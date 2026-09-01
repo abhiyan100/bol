@@ -2,15 +2,15 @@
 
 **Speak. Bol runs Claude Code hands-free.** · [bol-voice.vercel.app](https://bol-voice.vercel.app)
 
-*Bol* (बोल) means "speak" in Nepali and Hindi. Hold a key, talk to Claude Code,
-and — unlike every dictation tool — **Bol talks back**: when Claude finishes a
-turn, a summarizer tells you out loud what happened, flags anything that failed,
+*Bol* (बोल) means "speak" in Nepali. Hold a key, talk to Claude Code, and,
+unlike every dictation tool, **Bol talks back**: when Claude finishes a turn,
+a summarizer tells you out loud what happened, flags anything that failed,
 and asks what you want to do next. Fully local by default, zero recurring cost.
 
 ```
 you   (hold right-Option)  "refactor the auth module and run the tests… send it"
 claude                      …edits files, runs tests, finishes…
-bol   (out loud)            "Auth module's refactored and tests pass — one
+bol   (out loud)            "Auth module's refactored and tests pass. One
                              deprecation warning in login.py though. Ship it?"
 you                         "yes, commit it, send"
 ```
@@ -19,7 +19,7 @@ you                         "yes, commit it, send"
 
 Voice input tools for coding agents exist (infina.so, Superwhisper, Claude
 Code's own dictation). None of them close the loop: you still have to *read*
-the screen to know what your agent did. Bol closes it — dictation in, spoken
+the screen to know what your agent did. Bol closes it. Dictation in, spoken
 summary out, conversation continues. See [Anthropic's issue tracker](https://github.com/anthropics/claude-code/issues/50720)
 for how much people want this.
 
@@ -43,10 +43,10 @@ for how much people want this.
 - **Completion detection is exact**, not screen-scraping: Claude Code's own
   [hooks](https://code.claude.com/docs/en/hooks) post to Bol over loopback
   when a turn ends, including the final message and every tool call made.
-- **Everything runs locally** — STT ([parakeet-mlx](https://github.com/senstella/parakeet-mlx)),
+- **Everything runs locally**: STT ([parakeet-mlx](https://github.com/senstella/parakeet-mlx)),
   TTS (macOS `say`, or [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) via
   [mlx-audio](https://github.com/Blaizzy/mlx-audio)), and the default
-  summarizer (a deterministic template over the tool log — free and instant).
+  summarizer (a deterministic template over the tool log, free and instant).
   Optionally plug an OpenRouter model in for a wittier persona voice.
 
 ## Install
@@ -77,12 +77,12 @@ Hold **right Option** and speak. Voice commands ride on your speech:
 | "**type** hello world" | inserts text, no Enter |
 | "**send**" / "**go ahead**" | presses Enter (also answers permission prompts) |
 | "**close**" / "**scratch that**" | clears the input box |
-| "**interrupt**" / "**stop claude**" | Escape — stops the running turn |
+| "**interrupt**" / "**stop claude**" | Escape, stops the running turn |
 | "**say that again**" | re-speaks the last reply |
 | "**stop listening**" | sleep until the next hotkey press |
 
 When Claude finishes, Bol speaks a summary and reopens the mic (hands-free
-mode, on by default) — so the whole session is a conversation.
+mode, on by default), so the whole session is a conversation.
 
 No mic handy? `uv run bol talk` gives the identical loop over typed text.
 
@@ -106,12 +106,12 @@ mode = "toggle"              # tap instead of hold
 
 The persona summarizer needs `OPENROUTER_API_KEY`. Free-tier models are
 rate-limited (~50 requests/day); Bol silently falls back to the free template
-summarizer whenever the LLM is unavailable — the loop never breaks.
+summarizer whenever the LLM is unavailable, so the loop never breaks.
 
 ## Permissions (macOS)
 
-- **Microphone** — prompted on first recording, granted to your terminal app.
-- **Input Monitoring** — the global hotkey needs it: System Settings →
+- **Microphone**: prompted on first recording, granted to your terminal app.
+- **Input Monitoring**: the global hotkey needs it. System Settings →
   Privacy & Security → Input Monitoring → enable your terminal.
 
 ## Status & roadmap
@@ -126,16 +126,7 @@ Early but working end-to-end. Roadmap:
 
 ## Credits
 
-Bol stands on the shoulders of prior art it studied (and, where licenses
-allow, borrows patterns from):
-
-- [FluidVoice](https://github.com/altic-dev/FluidVoice) — the dictation UX
-  bar to clear; its modular STT provider design inspired Bol's.
-- [voicemode](https://github.com/mbailey/voicemode) — pioneered conversational
-  voice for Claude Code via MCP.
-- [Handy](https://github.com/cjpais/Handy) — proof that open-source local
-  dictation can be excellent.
-- [infina.so](https://www.infina.so) — the voice-command UX ("type…", "send")
-  Bol's grammar mirrors.
+- [FluidVoice](https://github.com/altic-dev/FluidVoice): its modular STT
+  provider design inspired Bol's.
 
 MIT licensed. PRs welcome.
