@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bol. Talk to Claude Code.</title>
+<meta name="description" content="Open-source voice loop for Claude Code on macOS. Hold a key, say what you want. Bol types it, sends it, and tells you out loud what Claude did.">
+<meta property="og:title" content="Bol. Talk to Claude Code.">
+<meta property="og:description" content="Hold a key. Say what you want. Bol types it, sends it, and tells you out loud what Claude did. Local, free, MIT.">
+<meta property="og:image" content="https://bol-voice.vercel.app/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0b0d'/%3E%3Cg fill='%23e8a33d'%3E%3Crect x='7' y='13' width='3' height='6' rx='1.5'/%3E%3Crect x='12' y='9' width='3' height='14' rx='1.5'/%3E%3Crect x='17' y='6' width='3' height='20' rx='1.5'/%3E%3Crect x='22' y='11' width='3' height='10' rx='1.5'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --bg-raise: #111114;
+    --line: #232328;
+    --text: #e9e7e2;
+    --text-dim: #8b8a86;
+    --text-faint: #55544f;
+    --accent: #e8a33d;
+    --accent-dim: #a97a34;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--accent); color: var(--bg); }
+  a { color: inherit; text-decoration: none; }
+  .wrap { max-width: 880px; margin: 0 auto; padding-left: 24px; padding-right: 24px; }
+
+  /* nav */
+  nav {
+    height: 64px;
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: 880px; margin: 0 auto; padding: 0 24px;
+  }
+  .mark { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.02em; }
+  .mark .bars { display: flex; align-items: center; gap: 2.5px; height: 16px; }
+  .mark .bars i { width: 3px; border-radius: 2px; background: var(--accent); display: block; }
+  .mark .bars i:nth-child(1) { height: 7px; }
+  .mark .bars i:nth-child(2) { height: 13px; }
+  .mark .bars i:nth-child(3) { height: 16px; }
+  .mark .bars i:nth-child(4) { height: 9px; }
+  nav .gh { color: var(--text-dim); transition: color .2s; }
+  nav .gh:hover { color: var(--text); }
+
+  /* hero */
+  header { padding: 72px 0 40px; }
+  h1 {
+    font-size: clamp(2.1rem, 6vw, 3.4rem);
+    letter-spacing: -0.04em;
+    line-height: 1.05;
+    font-weight: 700;
+  }
+  h1 .accent { color: var(--accent); }
+  .sub {
+    margin-top: 20px;
+    color: var(--text-dim);
+    max-width: 52ch;
+  }
+  .cta-row { margin-top: 32px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .install {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg-raise);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 11px 14px;
+    cursor: pointer;
+    transition: border-color .2s;
+    font-family: var(--mono); font-size: 13.5px; color: var(--text);
+  }
+  .install:hover { border-color: var(--accent-dim); }
+  .install:active { transform: translateY(1px); }
+  .install .dollar { color: var(--accent); }
+  .install .copied { color: var(--accent); display: none; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent);
+    color: #131006;
+    font-weight: 700;
+    border-radius: 8px;
+    padding: 12px 18px;
+    font-size: 13.5px;
+    transition: transform .15s;
+  }
+  .btn:hover { transform: translateY(-1px); }
+  .btn:active { transform: translateY(1px) scale(.98); }
+
+  /* terminal */
+  .term {
+    margin: 56px auto 0;
+    background: var(--bg-raise);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  }
+  .term-bar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); display: block; }
+  .term-bar span { margin-left: 10px; color: var(--text-faint); font-size: 12px; }
+  .term-body {
+    padding: 22px 22px 26px;
+    min-height: 300px;
+    font-size: 13.5px;
+    line-height: 2.05;
+  }
+  .term-body .row { display: flex; gap: 14px; opacity: 0; }
+  .term-body .row.show { opacity: 1; }
+  .who { flex: 0 0 52px; text-align: right; color: var(--text-faint); user-select: none; }
+  .row.you .who { color: var(--accent); }
+  .row.bol .who { color: var(--text); font-weight: 700; }
+  .line { color: var(--text-dim); white-space: pre-wrap; }
+  .row.you .line { color: var(--text); }
+  .row.bol .line { color: var(--text); }
+  .row.dim .line { color: var(--text-faint); }
+  .cmd { color: var(--accent); }
+  .cursor {
+    display: inline-block; width: 8px; height: 15px;
+    background: var(--accent);
+    vertical-align: -2px;
+    animation: blink 1s steps(1) infinite;
+  }
+  .speak-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; margin-left: 8px; }
+  .speak-bars i { width: 2.5px; background: var(--accent); border-radius: 1px; animation: bounce .7s ease-in-out infinite; }
+  .speak-bars i:nth-child(2) { animation-delay: .12s; }
+  .speak-bars i:nth-child(3) { animation-delay: .24s; }
+  .speak-bars i:nth-child(4) { animation-delay: .36s; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes bounce { 0%,100% { height: 3px; } 50% { height: 12px; } }
+
+  /* sections */
+  section { padding: 96px 0 0; }
+  h2 {
+    font-size: 1.05rem;
+    color: var(--text-faint);
+    font-weight: 400;
+    margin-bottom: 36px;
+  }
+  .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s cubic-bezier(.16,1,.3,1), transform .7s cubic-bezier(.16,1,.3,1); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  /* loop steps */
+  .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; border-top: 1px solid var(--line); }
+  .step { padding: 26px 18px 8px 0; }
+  .step b { display: block; font-size: 14.5px; margin-bottom: 6px; }
+  .step span { color: var(--text-dim); font-size: 13px; display: block; max-width: 24ch; }
+  .step .k {
+    display: inline-block; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: 0 7px; font-size: 12px; color: var(--text-dim);
+  }
+
+  /* commands */
+  .cmds { border-top: 1px solid var(--line); }
+  .cmds .row2 {
+    display: grid; grid-template-columns: 220px 1fr; gap: 20px;
+    padding: 13px 0;
+  }
+  .cmds .row2 + .row2 { border-top: 1px solid var(--line); }
+  .cmds .say { color: var(--accent); }
+  .cmds .does { color: var(--text-dim); }
+
+  /* local */
+  .facts { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 40px; }
+  .fact b { font-size: 1.5rem; letter-spacing: -0.03em; display: block; margin-bottom: 8px; }
+  .fact span { color: var(--text-dim); font-size: 13.5px; display: block; }
+
+  footer {
+    margin-top: 120px;
+    border-top: 1px solid var(--line);
+    padding: 36px 0 48px;
+    color: var(--text-faint);
+    font-size: 12.5px;
+  }
+  footer .wrap { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+  footer a { color: var(--text-dim); }
+  footer a:hover { color: var(--text); }
+
+  @media (max-width: 720px) {
+    .steps { grid-template-columns: 1fr; }
+    .step { padding: 20px 0 12px; border-bottom: 1px solid var(--line); }
+    .step:last-child { border-bottom: 0; }
+    .facts { grid-template-columns: 1fr; gap: 28px; }
+    .cmds .row2 { grid-template-columns: 1fr; gap: 2px; }
+    .who { flex-basis: 42px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; transition: none; }
+    .cursor, .speak-bars i { animation: none; }
+    .term-body .row { opacity: 1 !important; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <a class="mark" href="#">
+    <span class="bars" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+    bol
+  </a>
+  <a class="gh" href="https://github.com/abhiyan100/bol">GitHub &nearr;</a>
+</nav>
+
+<header class="wrap">
+  <h1>Talk to Claude Code.<br><span class="accent">It talks back.</span></h1>
+  <p class="sub">Hold a key. Say what you want. Bol types it, sends it, and tells you out loud what Claude did.</p>
+  <div class="cta-row">
+    <button class="install" id="install" aria-label="Copy clone command">
+      <span class="dollar">$</span>
+      <span id="install-text">git clone https://github.com/abhiyan100/bol</span>
+      <span class="copied" id="copied">copied</span>
+    </button>
+    <a class="btn" href="https://github.com/abhiyan100/bol">Star on GitHub</a>
+  </div>
+
+  <div class="term" role="img" aria-label="Animated demo of a Bol voice session with Claude Code">
+    <div class="term-bar"><i></i><i></i><i></i><span>bol · tmux</span></div>
+    <div class="term-body" id="demo"></div>
+  </div>
+</header>
+
+<section class="wrap reveal">
+  <h2>The loop</h2>
+  <div class="steps">
+    <div class="step"><b>Hold <span class="k">right &#8997;</span></b><span>Global hotkey. Any app, any time.</span></div>
+    <div class="step"><b>Speak</b><span>Local speech to text. Nothing leaves your Mac.</span></div>
+    <div class="step"><b>Say <span style="color:var(--accent)">"send it"</span></b><span>Bol pastes into your live Claude Code session.</span></div>
+    <div class="step"><b>Hear back</b><span>When Claude finishes, Bol speaks a summary and flags failures.</span></div>
+  </div>
+</section>
+
+<section class="wrap reveal">
+  <h2>Voice commands</h2>
+  <div class="cmds">
+    <div class="row2"><span class="say">"... send it"</span><span class="does">submits the prompt</span></div>
+    <div class="row2"><span class="say">"type git status"</span><span class="does">inserts text, no Enter</span></div>
+    <div class="row2"><span class="say">"scratch that"</span><span class="does">clears the input</span></div>
+    <div class="row2"><span class="say">"stop claude"</span><span class="does">interrupts the running turn</span></div>
+    <div class="row2"><span class="say">"go ahead"</span><span class="does">approves a permission prompt</span></div>
+    <div class="row2"><span class="say">"stop listening"</span><span class="does">sleeps until the next hotkey</span></div>
+  </div>
+</section>
+
+<section class="wrap reveal">
+  <h2>Built to stay yours</h2>
+  <div class="facts">
+    <div class="fact"><b>100% local</b><span>Parakeet speech recognition and Kokoro voices run on your Mac. Your terminal never leaves the room.</span></div>
+    <div class="fact"><b>$0</b><span>No API keys required. No subscription. Ever.</span></div>
+    <div class="fact"><b>MIT</b><span>Fork it, ship it, make it yours.</span></div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Bol means "speak" in Nepali.</span>
+    <span>
+      <a href="https://github.com/abhiyan100/bol">GitHub</a> &nbsp;
+      <a href="https://github.com/abhiyan100/bol#credits">Credits</a> &nbsp;
+      <a href="https://github.com/abhiyan100/bol/blob/main/LICENSE">MIT</a>
+    </span>
+  </div>
+</footer>
+
+<script>
+  // clipboard
+  const install = document.getElementById('install');
+  install.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText('git clone https://github.com/abhiyan100/bol');
+      document.getElementById('copied').style.display = 'inline';
+      setTimeout(() => document.getElementById('copied').style.display = 'none', 1600);
+    } catch (e) {}
+  });
+
+  // scroll reveal
+  const io = new IntersectionObserver(entries => {
+    entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } });
+  }, { threshold: 0.2 });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+  // terminal demo
+  const SCRIPT = [
+    { who: 'you',    cls: 'you', text: 'refactor the auth module and run the tests ', cmd: 'send it', speak: true },
+    { who: 'bol',    cls: 'bol', text: 'sent. Claude’s turn.' },
+    { who: 'claude', cls: 'dim', text: 'editing auth.py' },
+    { who: 'claude', cls: 'dim', text: 'running pytest ... 34 passed, 1 warning' },
+    { who: 'bol',    cls: 'bol', text: 'Auth module’s refactored and tests pass. One deprecation warning in login.py though. Ship it?' },
+    { who: 'you',    cls: 'you', text: 'yes, commit it, ', cmd: 'send', speak: true },
+    { who: 'bol',    cls: 'bol', text: 'sent. Claude’s turn.' },
+  ];
+  const demo = document.getElementById('demo');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function renderStatic() {
+    demo.innerHTML = '';
+    SCRIPT.forEach(s => {
+      const row = document.createElement('div');
+      row.className = 'row show ' + s.cls;
+      row.innerHTML = '<span class="who">' + s.who + '</span><span class="line">' + s.text +
+        (s.cmd ? '<span class="cmd">' + s.cmd + '</span>' : '') + '</span>';
+      demo.appendChild(row);
+    });
+  }
+
+  async function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function typeInto(el, text, cps) {
+    for (const ch of text) {
+      el.insertBefore(document.createTextNode(ch), el.lastChild);
+      await wait(1000 / cps + Math.random() * 18);
+    }
+  }
+
+  async function play() {
+    while (true) {
+      demo.innerHTML = '';
+      for (const s of SCRIPT) {
+        const row = document.createElement('div');
+        row.className = 'row show ' + s.cls;
+        const who = document.createElement('span');
+        who.className = 'who'; who.textContent = s.who;
+        const line = document.createElement('span');
+        line.className = 'line';
+        const cursor = document.createElement('span');
+        cursor.className = 'cursor';
+        line.appendChild(cursor);
+        row.appendChild(who); row.appendChild(line);
+        if (s.speak) {
+          const bars = document.createElement('span');
+          bars.className = 'speak-bars';
+          bars.innerHTML = '<i></i><i></i><i></i><i></i>';
+          row.appendChild(bars);
+        }
+        demo.appendChild(row);
+        await typeInto(line, s.text, s.cls === 'you' ? 26 : 42);
+        if (s.cmd) {
+          const c = document.createElement('span');
+          c.className = 'cmd';
+          line.insertBefore(c, cursor);
+          for (const ch of s.cmd) { c.textContent += ch; await wait(52); }
+        }
+        cursor.remove();
+        const barsEl = row.querySelector('.speak-bars');
+        if (barsEl) barsEl.remove();
+        await wait(s.cls === 'dim' ? 420 : 900);
+      }
+      await wait(4200);
+    }
+  }
+
+  if (reduced) renderStatic(); else play();
+</script>
+</body>
+</html>

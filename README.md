@@ -1,6 +1,6 @@
 # Bol
 
-**Speak. Bol runs Claude Code hands-free.**
+**Speak. Bol runs Claude Code hands-free.** · [bol-voice.vercel.app](https://bol-voice.vercel.app)
 
 *Bol* (बोल) means "speak" in Nepali and Hindi. Hold a key, talk to Claude Code,
 and — unlike every dictation tool — **Bol talks back**: when Claude finishes a
