@@ -93,3 +93,16 @@ def test_type_never_cleans():
     assert p.action is Action.TYPE
     assert p.text == "clean it up"
     assert p.clean is False
+
+
+def test_grammar_remap_replaces_defaults():
+    from bol.grammar import Grammar
+
+    g = Grammar({"send": ["ship it", "go"], "interrupt": ["whoa whoa"]})
+    p = g.parse("fix the login bug ship it")
+    assert p.action is Action.SEND and p.text == "fix the login bug"
+    assert g.parse("whoa whoa").action is Action.INTERRUPT
+    # remapped key: old default no longer triggers
+    assert g.parse("fix the bug send it").action is Action.DICTATE
+    # untouched key keeps defaults
+    assert g.parse("scratch that").action is Action.DISCARD

@@ -113,6 +113,10 @@ class ServerConfig:
 
 @dataclass
 class Config:
+    # Voice-command phrase overrides: {"send": [...], "type": [...],
+    # "discard": [...], "sleep": [...], "interrupt": [...], "repeat": [...],
+    # "clean": [...]}. Unset keys keep the defaults.
+    commands: dict = field(default_factory=dict)
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
@@ -151,7 +155,7 @@ def load_config(path: Path | None = None) -> Config:
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
-        for name in ("hands_free", "sound_cues"):
+        for name in ("hands_free", "sound_cues", "commands"):
             if name in data:
                 setattr(cfg, name, data[name])
     return cfg
@@ -166,6 +170,12 @@ sound_cues = true    # audible blips when listening starts/stops
 [hotkey]
 mode = "push_to_talk"  # or "toggle"
 key = "alt_r"          # right Option
+
+# Remap any voice command to whatever you like. Unset keys keep defaults.
+# [commands]
+# send = ["ship it", "send it", "go"]
+# discard = ["forget it"]
+# interrupt = ["whoa whoa"]
 
 [stt]
 engine = "parakeet"    # or "none" for text-only mode

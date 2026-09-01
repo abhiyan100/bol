@@ -39,109 +39,116 @@ class Parsed:
 
 _PUNCT = re.compile(r"[.,!?;:]+")
 
-# Trailing phrases → action. Longest match wins. Checked against the
-# normalized tail of the utterance.
-_TRAILING: list[tuple[str, Action]] = [
-    ("send it off", Action.SEND),
-    ("and send it", Action.SEND),
-    ("send it", Action.SEND),
-    ("send that", Action.SEND),
-    ("send", Action.SEND),
-    ("go ahead", Action.SEND),
-    ("submit", Action.SEND),
-]
-
-# Whole-utterance phrases → action (no payload text).
-_STANDALONE: dict[str, Action] = {
-    "close": Action.DISCARD,
-    "cancel": Action.DISCARD,
-    "scratch that": Action.DISCARD,
-    "never mind": Action.DISCARD,
-    "nevermind": Action.DISCARD,
-    "discard": Action.DISCARD,
-    "stop listening": Action.SLEEP,
-    "go to sleep": Action.SLEEP,
-    "sleep": Action.SLEEP,
-    "interrupt": Action.INTERRUPT,
-    "stop claude": Action.INTERRUPT,
-    "stop stop": Action.INTERRUPT,
-    "say that again": Action.REPEAT,
-    "repeat that": Action.REPEAT,
-    "what did you say": Action.REPEAT,
+# Default phrases per command. Every list is user-remappable via
+# [commands] in config.toml; see Grammar below.
+DEFAULT_PHRASES: dict[str, list[str]] = {
+    "send": [
+        "send it off", "and send it", "send it", "send that", "send",
+        "go ahead", "submit",
+    ],
+    "type": ["type", "write"],
+    "discard": [
+        "close", "cancel", "scratch that", "never mind", "nevermind",
+        "discard",
+    ],
+    "sleep": ["stop listening", "go to sleep", "sleep"],
+    "interrupt": ["interrupt", "stop claude", "stop stop"],
+    "repeat": ["say that again", "repeat that", "what did you say"],
+    "clean": ["clean it up", "clean that up", "clean up", "fix it up",
+              "tidy it up"],
 }
 
-_TYPE_PREFIX = re.compile(r"^type\s+", re.IGNORECASE)
-_WRITE_PREFIX = re.compile(r"^write\s+", re.IGNORECASE)
-
-_CLEAN_PHRASES = [
-    "clean it up",
-    "clean that up",
-    "clean up",
-    "fix it up",
-    "tidy it up",
-]
+_STANDALONE_ACTIONS = {
+    "discard": Action.DISCARD,
+    "sleep": Action.SLEEP,
+    "interrupt": Action.INTERRUPT,
+    "repeat": Action.REPEAT,
+}
 
 
 def _norm(text: str) -> str:
     return _PUNCT.sub("", text.strip().lower()).strip()
 
 
-def parse_transcript(transcript: str) -> Parsed:
-    raw = transcript.strip()
-    if not raw:
-        return Parsed(Action.DICTATE, "")
+class Grammar:
+    """Command matcher built from (possibly user-remapped) phrase lists."""
 
-    norm = _norm(raw)
+    def __init__(self, overrides: dict[str, list[str]] | None = None) -> None:
+        phrases = dict(DEFAULT_PHRASES)
+        for key, value in (overrides or {}).items():
+            if key in phrases and isinstance(value, list) and value:
+                phrases[key] = [str(p).lower() for p in value]
+        # Longer phrases must match before their prefixes ("send it" > "send").
+        self._send = sorted(phrases["send"], key=len, reverse=True)
+        self._clean = sorted(phrases["clean"], key=len, reverse=True)
+        self._type_prefix = re.compile(
+            r"^(?:" + "|".join(re.escape(p) for p in phrases["type"]) + r")\s+",
+            re.IGNORECASE,
+        )
+        self._standalone: dict[str, Action] = {}
+        for key, action in _STANDALONE_ACTIONS.items():
+            for phrase in phrases[key]:
+                self._standalone[_norm(phrase)] = action
 
-    if norm in _STANDALONE:
-        return Parsed(_STANDALONE[norm])
+    def parse(self, transcript: str) -> Parsed:
+        raw = transcript.strip()
+        if not raw:
+            return Parsed(Action.DICTATE, "")
 
-    # Leading "type ..." → literal text, no submit, never cleaned (the user
-    # asked for these exact characters).
-    m = _TYPE_PREFIX.match(raw) or _WRITE_PREFIX.match(raw)
-    if m:
-        payload = raw[m.end():].strip()
-        parsed_tail = _strip_trailing_send(payload)
-        if parsed_tail is not None:
-            return Parsed(Action.SEND, parsed_tail)
-        return Parsed(Action.TYPE, payload)
+        norm = _norm(raw)
+        if norm in self._standalone:
+            return Parsed(self._standalone[norm])
 
-    stripped = _strip_trailing_send(raw)
-    if stripped is not None:
-        payload, clean = _strip_trailing_clean(stripped)
-        return Parsed(Action.SEND, payload, clean=clean)
+        # Leading type-prefix → literal text, no submit, never cleaned (the
+        # user asked for these exact characters).
+        m = self._type_prefix.match(raw)
+        if m:
+            payload = raw[m.end():].strip()
+            parsed_tail = self._strip_trailing_send(payload)
+            if parsed_tail is not None:
+                return Parsed(Action.SEND, parsed_tail)
+            return Parsed(Action.TYPE, payload)
 
-    payload, clean = _strip_trailing_clean(raw)
-    return Parsed(Action.DICTATE, payload, clean=clean)
+        stripped = self._strip_trailing_send(raw)
+        if stripped is not None:
+            payload, clean = self._strip_trailing_clean(stripped)
+            return Parsed(Action.SEND, payload, clean=clean)
 
+        payload, clean = self._strip_trailing_clean(raw)
+        return Parsed(Action.DICTATE, payload, clean=clean)
 
-def _strip_trailing_clean(raw: str) -> tuple[str, bool]:
-    """Strip a trailing "clean it up" phrase (with an optional joining
-    "and"/comma); returns (payload, clean_requested)."""
-    norm = _norm(raw)
-    for phrase in _CLEAN_PHRASES:
-        for suffix in (" and " + phrase, " " + phrase):
-            if norm.endswith(suffix) or norm == suffix.strip():
-                n_words = len(suffix.split())
+    def _strip_trailing_clean(self, raw: str) -> tuple[str, bool]:
+        """Strip a trailing clean phrase (with an optional joining "and");
+        returns (payload, clean_requested)."""
+        norm = _norm(raw)
+        for phrase in self._clean:
+            for suffix in (" and " + phrase, " " + phrase):
+                if norm.endswith(suffix) or norm == suffix.strip():
+                    n_words = len(suffix.split())
+                    words = raw.split()
+                    payload = " ".join(words[:-n_words]).rstrip(" ,.;")
+                    return payload, True
+        return raw, False
+
+    def _strip_trailing_send(self, raw: str) -> str | None:
+        """If the utterance ends with a send phrase, return the text before."""
+        norm = _norm(raw)
+        for phrase in self._send:
+            if norm == phrase:
+                return ""
+            if norm.endswith(" " + phrase):
+                # Cut the phrase off by word count, preserving the payload's
+                # original casing/punctuation.
+                n_words = len(phrase.split())
                 words = raw.split()
-                payload = " ".join(words[:-n_words]).rstrip(" ,.;")
-                return payload, True
-    return raw, False
+                payload = " ".join(words[:-n_words]).strip()
+                return payload.rstrip(" ,.;") if payload else ""
+        return None
 
 
-def _strip_trailing_send(raw: str) -> str | None:
-    """If the utterance ends with a send phrase, return the text before it."""
-    norm = _norm(raw)
-    for phrase, action in _TRAILING:
-        if action is not Action.SEND:
-            continue
-        if norm == phrase:
-            return ""
-        if norm.endswith(" " + phrase):
-            # Cut the phrase off the raw string by word count, preserving
-            # original casing/punctuation of the payload.
-            n_words = len(phrase.split())
-            words = raw.split()
-            payload = " ".join(words[:-n_words]).strip()
-            return _PUNCT.sub("", payload) if not payload else payload.rstrip(" ,.;")
-    return None
+_DEFAULT_GRAMMAR = Grammar()
+
+
+def parse_transcript(transcript: str) -> Parsed:
+    """Parse with the default phrase set."""
+    return _DEFAULT_GRAMMAR.parse(transcript)

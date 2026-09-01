@@ -19,7 +19,7 @@ from .audio import Recorder
 from .bridge import BridgeError, build_bridge
 from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
 from .config import Config, hook_token
-from .grammar import Action, parse_transcript
+from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker
 from .hotkey import HotkeyListener
 from .llm import LLMEngine
@@ -35,6 +35,7 @@ class Daemon:
         self.cfg = cfg
         self.text_mode = text_mode
         self.bridge = build_bridge(cfg)
+        self.grammar = Grammar(cfg.commands)
         self.tracker = TurnTracker()
         self.server = HookServer(cfg.server.host, cfg.server.port, hook_token())
         self.speaker = build_speaker(cfg)
@@ -199,7 +200,7 @@ class Daemon:
                     await self.bridge.inject_keys("Escape")
                     print("bol: denied.")
                     return True
-            return await self._apply(parse_transcript(text))
+            return await self._apply(self.grammar.parse(text))
         except BridgeError as exc:
             msg = f"Couldn't reach Claude: {exc}"
             print(f"bol: {msg}")

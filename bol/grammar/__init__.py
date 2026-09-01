@@ -1,3 +1,3 @@
-from .commands import Action, Parsed, parse_transcript
+from .commands import Action, Grammar, Parsed, parse_transcript
 
-__all__ = ["Action", "Parsed", "parse_transcript"]
+__all__ = ["Action", "Grammar", "Parsed", "parse_transcript"]

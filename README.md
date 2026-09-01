@@ -20,8 +20,7 @@ you                         "yes, commit it, send"
 Voice input tools for coding agents exist (infina.so, Superwhisper, Claude
 Code's own dictation). None of them close the loop: you still have to *read*
 the screen to know what your agent did. Bol closes it. Dictation in, spoken
-summary out, conversation continues. See [Anthropic's issue tracker](https://github.com/anthropics/claude-code/issues/50720)
-for how much people want this.
+summary out, conversation continues.
 
 ## How it works
 
@@ -95,6 +94,14 @@ Voice commands ride on your speech:
 | "**say that again**" | re-speaks the last reply |
 | "**stop listening**" | sleep until the next hotkey press |
 
+Every phrase is yours to remap:
+
+```toml
+[commands]
+send = ["ship it", "go"]
+interrupt = ["whoa whoa"]
+```
+
 When Claude finishes, Bol speaks a summary and reopens the mic (hands-free
 mode, on by default), so the whole session is a conversation.
 
@@ -151,16 +158,6 @@ instead.
   Privacy & Security → Input Monitoring → enable your terminal.
 - **Automation** (focused mode): macOS asks once when Bol first pastes via
   System Events. Not needed in tmux mode.
-
-## Status & roadmap
-
-Early but working end-to-end. Roadmap:
-
-- [ ] Menu-bar app (signed .app; stable mic permission, modifier-only hotkeys)
-- [ ] Streaming TTS (speak the first sentence while the rest generates)
-- [ ] Silero VAD (replace the energy gate)
-- [ ] Apple SpeechAnalyzer backend on macOS 26+
-- [ ] Mobile companion (the daemon already speaks a clean protocol)
 
 ## Credits
 
