@@ -20,12 +20,16 @@ import shutil
 import sys
 
 from . import __version__
-from .config import CONFIG_PATH, load_config, write_default_config
+from .config import CONFIG_PATH, hook_token, load_config, write_default_config
 from .hooks import installer
 
 
-def _url(cfg) -> str:
+def _base_url(cfg) -> str:
     return f"http://{cfg.server.host}:{cfg.server.port}/hook"
+
+
+def _url(cfg) -> str:
+    return f"{_base_url(cfg)}?token={hook_token()}"
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -34,6 +38,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config()
     if not installer.installed(_url(cfg)):
         print("bol: hooks not installed — running `bol hook install` for you.")
+        installer.uninstall(_base_url(cfg))  # drop stale token-less entries
         installer.install(_url(cfg))
         print("bol: note — Claude Code sessions started before this need a restart to pick up hooks.")
     daemon = Daemon(cfg, text_mode=args.text)
@@ -65,6 +70,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
     cfg = load_config()
     url = _url(cfg)
     if args.hook_cmd == "install":
+        installer.uninstall(_base_url(cfg), scope=args.scope)
         path = installer.install(url, scope=args.scope)
         print(f"bol: hooks installed in {path}")
         print("bol: restart running Claude Code sessions to pick them up.")
@@ -119,9 +125,17 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         "bol hook install",
     )
     check("config file", CONFIG_PATH.exists(), "bol config")
-    if cfg.summarizer.engine == "openrouter":
-        check("OpenRouter key", bool(cfg.openrouter_key),
-              "set OPENROUTER_API_KEY or [summarizer] openrouter_api_key")
+
+    if cfg.llm.provider == "local":
+        try:
+            import mlx_lm  # noqa: F401
+            check("mlx-lm (local brain: cleanup + persona summaries)", True)
+        except ImportError:
+            print("  [ -- ] mlx-lm not installed — template summaries only "
+                  "(optional: uv sync --extra llm)")
+    elif cfg.llm.provider == "api":
+        check(f"API key (${cfg.llm.api_key_env})", bool(cfg.api_key),
+              f"export {cfg.llm.api_key_env}=... for {cfg.llm.base_url or 'your endpoint'}")
 
     async def _bridge_check() -> str:
         from .bridge import TmuxBridge, TmuxError

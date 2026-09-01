@@ -19,9 +19,10 @@ Handler = Callable[[dict], Awaitable[None]]
 
 
 class HookServer:
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, token: str = "") -> None:
         self._host = host
         self._port = port
+        self._token = token
         self._handlers: dict[str, Handler] = {}
         self._runner: web.AppRunner | None = None
 
@@ -29,6 +30,8 @@ class HookServer:
         self._handlers[event] = handler
 
     async def _handle(self, request: web.Request) -> web.Response:
+        if self._token and request.query.get("token") != self._token:
+            return web.json_response({}, status=401)
         try:
             payload = await request.json()
         except Exception:

@@ -67,3 +67,29 @@ def test_send_inside_sentence_not_triggered():
 
 def test_empty():
     assert parse_transcript("   ").action is Action.DICTATE
+
+
+def test_clean_and_send():
+    p = parse_transcript("refactor the auth module clean it up and send it")
+    assert p.action is Action.SEND
+    assert p.text == "refactor the auth module"
+    assert p.clean is True
+
+
+def test_clean_without_send_dictates():
+    p = parse_transcript("add a login test clean it up")
+    assert p.action is Action.DICTATE
+    assert p.text == "add a login test"
+    assert p.clean is True
+
+
+def test_send_without_clean_flag():
+    p = parse_transcript("fix the bug send it")
+    assert p.clean is False
+
+
+def test_type_never_cleans():
+    p = parse_transcript("type clean it up")
+    assert p.action is Action.TYPE
+    assert p.text == "clean it up"
+    assert p.clean is False

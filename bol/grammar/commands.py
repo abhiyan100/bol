@@ -33,6 +33,8 @@ class Action(Enum):
 class Parsed:
     action: Action
     text: str = ""
+    # "clean it up" rider: run the LLM cleanup pass on text before injecting.
+    clean: bool = False
 
 
 _PUNCT = re.compile(r"[.,!?;:]+")
@@ -71,6 +73,14 @@ _STANDALONE: dict[str, Action] = {
 _TYPE_PREFIX = re.compile(r"^type\s+", re.IGNORECASE)
 _WRITE_PREFIX = re.compile(r"^write\s+", re.IGNORECASE)
 
+_CLEAN_PHRASES = [
+    "clean it up",
+    "clean that up",
+    "clean up",
+    "fix it up",
+    "tidy it up",
+]
+
 
 def _norm(text: str) -> str:
     return _PUNCT.sub("", text.strip().lower()).strip()
@@ -86,7 +96,8 @@ def parse_transcript(transcript: str) -> Parsed:
     if norm in _STANDALONE:
         return Parsed(_STANDALONE[norm])
 
-    # Leading "type ..." → literal text, no submit.
+    # Leading "type ..." → literal text, no submit, never cleaned (the user
+    # asked for these exact characters).
     m = _TYPE_PREFIX.match(raw) or _WRITE_PREFIX.match(raw)
     if m:
         payload = raw[m.end():].strip()
@@ -97,9 +108,25 @@ def parse_transcript(transcript: str) -> Parsed:
 
     stripped = _strip_trailing_send(raw)
     if stripped is not None:
-        return Parsed(Action.SEND, stripped)
+        payload, clean = _strip_trailing_clean(stripped)
+        return Parsed(Action.SEND, payload, clean=clean)
 
-    return Parsed(Action.DICTATE, raw)
+    payload, clean = _strip_trailing_clean(raw)
+    return Parsed(Action.DICTATE, payload, clean=clean)
+
+
+def _strip_trailing_clean(raw: str) -> tuple[str, bool]:
+    """Strip a trailing "clean it up" phrase (with an optional joining
+    "and"/comma); returns (payload, clean_requested)."""
+    norm = _norm(raw)
+    for phrase in _CLEAN_PHRASES:
+        for suffix in (" and " + phrase, " " + phrase):
+            if norm.endswith(suffix) or norm == suffix.strip():
+                n_words = len(suffix.split())
+                words = raw.split()
+                payload = " ".join(words[:-n_words]).rstrip(" ,.;")
+                return payload, True
+    return raw, False
 
 
 def _strip_trailing_send(raw: str) -> str | None:

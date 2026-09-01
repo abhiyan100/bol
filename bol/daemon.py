@@ -17,10 +17,12 @@ import sys
 
 from .audio import Recorder
 from .bridge import BridgeError, build_bridge
-from .config import Config
+from .cleanup import CLEANUP_SYSTEM, clean_transcript
+from .config import Config, hook_token
 from .grammar import Action, parse_transcript
 from .hooks import HookServer, TurnTracker
 from .hotkey import HotkeyListener
+from .llm import LLMEngine
 from .speak import build_speaker, play_cue
 from .stt import build_transcriber
 from .summarize import build_summarizer
@@ -34,9 +36,10 @@ class Daemon:
         self.text_mode = text_mode
         self.bridge = build_bridge(cfg)
         self.tracker = TurnTracker()
-        self.server = HookServer(cfg.server.host, cfg.server.port)
+        self.server = HookServer(cfg.server.host, cfg.server.port, hook_token())
         self.speaker = build_speaker(cfg)
-        self.summarizer = build_summarizer(cfg)
+        self.engine = LLMEngine(cfg)
+        self.summarizer = build_summarizer(cfg, self.engine)
         self.recorder = Recorder(cfg.audio)
         self.transcriber = None if text_mode else build_transcriber(cfg)
         self.hotkey: HotkeyListener | None = None
@@ -60,6 +63,10 @@ class Daemon:
         self.server.on("PostToolUse", self._on_tool)
         self.server.on("Notification", self._on_notification)
         await self.server.start()
+        # LLM warms in the background; template/raw fallbacks cover the gap
+        # (and the first run's model download).
+        engine_task = asyncio.get_running_loop().create_task(self.engine.start())
+        engine_task.add_done_callback(lambda t: t.exception())
         print(f"bol: hook server on http://{self.cfg.server.host}:{self.cfg.server.port}/hook")
 
         if self.transcriber is not None:
@@ -82,11 +89,21 @@ class Daemon:
         finally:
             self.hotkey.stop()
             await self.server.stop()
+            await self.engine.stop()
 
     # ---------------------------------------------------------------- listening
 
     def _hotkey_pressed(self) -> None:
         self._asleep = False
+        # Warm the KV cache for the next LLM call while the user speaks:
+        # api mode cleans the transcript first; local mode's next call is
+        # the persona summary.
+        if self.cfg.llm.provider == "api":
+            self.engine.prewarm(CLEANUP_SYSTEM)
+        else:
+            system = getattr(self.summarizer, "system_prompt", None)
+            if system:
+                self.engine.prewarm(system)
         # The session token is minted HERE, synchronously, so a release that
         # lands before recording starts still stops exactly this session.
         session = self.recorder.begin()
@@ -190,6 +207,20 @@ class Daemon:
 
     async def _apply(self, parsed) -> bool:
         action, text = parsed.action, parsed.text
+        mode = self.cfg.cleanup.mode
+        wants_clean = (parsed.clean and mode != "off") or (
+            mode == "always" and action in (Action.DICTATE, Action.SEND)
+        )
+        if wants_clean and text:
+            cleaned = await clean_transcript(
+                self.engine,
+                text,
+                self.cfg.cleanup.deadline_s,
+                use_llm=self.cfg.llm.provider == "api",
+            )
+            if cleaned != text:
+                print(f"bol: cleaned -> {cleaned}")
+                text = cleaned
         if action is Action.DICTATE:
             await self.bridge.inject(text + " ", submit=False)
             return True
@@ -267,3 +298,4 @@ class Daemon:
                 await self._handle_utterance(line)
         finally:
             await self.server.stop()
+            await self.engine.stop()

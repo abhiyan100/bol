@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 stt = ["parakeet-mlx>=0.3"]
+llm = ["mlx-lm>=0.24"]
 # misaki's G2P needs spacy + friends; we list them directly instead of
 # misaki[en] because that extra drags in torch (~500MB) via
 # spacy-curated-transformers, which the mlx pipeline never uses.
@@ -31,7 +32,7 @@ kokoro = [
     "espeakng-loader",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
-all = ["bol[stt,kokoro]"]
+all = ["bol[stt,llm,kokoro]"]
 
 [tool.uv]
 # Bol is a macOS tool; keep Linux/CUDA wheels out of the lock.

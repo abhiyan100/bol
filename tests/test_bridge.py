@@ -2,6 +2,7 @@ import pytest
 
 from bol.bridge import BridgeError, FocusedBridge, TmuxBridge, TmuxError, build_bridge
 from bol.bridge.base import AutoBridge
+from bol.bridge.focused import SubmitBlocked
 from bol.config import Config
 
 
@@ -49,7 +50,11 @@ async def test_focused_guard_allows_terminal(monkeypatch):
         calls.append(("osascript", script))
         return ""
 
+    async def fake_title():
+        return "claude - myproject"
+
     monkeypatch.setattr(bridge, "_frontmost", fake_front)
+    monkeypatch.setattr(bridge, "_front_window_title", fake_title)
     monkeypatch.setattr("bol.bridge.focused._run", fake_run)
     monkeypatch.setattr("bol.bridge.focused._osascript", fake_osascript)
 
@@ -60,3 +65,34 @@ async def test_focused_guard_allows_terminal(monkeypatch):
     copied = [c for c in calls if c[0] == ("pbcopy",)]
     assert copied[0][1] == b"git status"               # our text on pasteboard
     assert len(copied) == 2                            # and restored after
+
+
+@pytest.mark.asyncio
+async def test_focused_submit_blocked_in_plain_shell(monkeypatch):
+    bridge = FocusedBridge(["com.apple.Terminal"], 0.0)
+    typed = []
+
+    async def fake_front():
+        return "com.apple.Terminal"
+
+    async def fake_title():
+        return "zsh - ~/dotfiles"
+
+    async def fake_run(cmd, stdin=None):
+        typed.append((tuple(cmd), stdin))
+        return b""
+
+    async def fake_osascript(script):
+        typed.append(("osascript", script))
+        return ""
+
+    monkeypatch.setattr(bridge, "_frontmost", fake_front)
+    monkeypatch.setattr(bridge, "_front_window_title", fake_title)
+    monkeypatch.setattr("bol.bridge.focused._run", fake_run)
+    monkeypatch.setattr("bol.bridge.focused._osascript", fake_osascript)
+
+    with pytest.raises(SubmitBlocked):
+        await bridge.inject("rm -rf build send it payload", submit=True)
+    scripts = [t[1] for t in typed if t[0] == "osascript"]
+    assert any('keystroke "v"' in s for s in scripts)   # text still typed
+    assert not any("key code 36" in s for s in scripts)  # Enter withheld

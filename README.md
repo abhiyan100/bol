@@ -48,9 +48,14 @@ for how much people want this.
   when a turn ends, including the final message and every tool call made.
 - **Everything runs locally**: STT ([parakeet-mlx](https://github.com/senstella/parakeet-mlx)),
   TTS (macOS `say`, or [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M) via
-  [mlx-audio](https://github.com/Blaizzy/mlx-audio)), and the default
-  summarizer (a deterministic template over the tool log, free and instant).
-  Optionally plug an OpenRouter model in for a wittier persona voice.
+  [mlx-audio](https://github.com/Blaizzy/mlx-audio)), and a small local brain
+  ([LFM2.5-1.2B](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct) via
+  [mlx-lm](https://github.com/ml-explore/mlx-lm)) that writes the spoken
+  summaries and cleans up your dictation on request. No account, no key.
+  A deterministic template summarizer is the always-on fallback.
+- **Bring your own inference if you want.** One config block points the brain
+  at any OpenAI-compatible endpoint instead: OpenRouter, Groq, Ollama,
+  LM Studio, OpenAI, Anthropic. Your key, your model, your call.
 
 ## Install
 
@@ -58,8 +63,8 @@ Requires macOS on Apple Silicon, [Claude Code](https://code.claude.com), and
 [uv](https://docs.astral.sh/uv/).
 
 ```bash
-git clone <this-repo-url> bol && cd bol
-uv sync --extra stt          # add --extra kokoro for the neural voice
+git clone https://github.com/abhiyan100/bol && cd bol
+uv sync --extra all          # or pick: --extra stt --extra llm --extra kokoro
 uv run bol doctor            # checks everything, tells you what's missing
 ```
 
@@ -86,6 +91,7 @@ Voice commands ride on your speech:
 | "**send**" / "**go ahead**" | presses Enter (also answers permission prompts) |
 | "**close**" / "**scratch that**" | clears the input box |
 | "**interrupt**" / "**stop claude**" | Escape, stops the running turn |
+| "…**clean it up and send it**" | strips fillers and stutters, fixes "auth dot py" to `auth.py`, then submits |
 | "**say that again**" | re-speaks the last reply |
 | "**stop listening**" | sleep until the next hotkey press |
 
@@ -103,18 +109,35 @@ Highlights:
 [tts]
 engine = "kokoro"            # neural voice instead of `say`
 
+[llm]
+provider = "local"           # default: LFM2.5-1.2B on your Mac, no key
+# local_model = "LiquidAI/LFM2.5-350M-MLX-4bit"   # low-RAM Macs
+
+# or bring your own key, any OpenAI-compatible endpoint:
+# provider = "api"
+# base_url = "https://openrouter.ai/api/v1"
+# api_model = "google/gemini-2.5-flash-lite"
+# api_key_env = "BOL_API_KEY"
+
+[cleanup]
+mode = "on_command"          # "always" cleans every dictation; "off" never
+
 [summarizer]
-engine = "openrouter"        # persona voice for summaries
-openrouter_model = "nvidia/nemotron-3.5-lightning:free"
 user_name = "Abhiyan"        # spoken in replies
 
 [hotkey]
 mode = "toggle"              # tap instead of hold
 ```
 
-The persona summarizer needs `OPENROUTER_API_KEY`. Free-tier models are
-rate-limited (~50 requests/day); Bol silently falls back to the free template
-summarizer whenever the LLM is unavailable, so the loop never breaks.
+Every AI layer degrades gracefully: if the model is still downloading, busy,
+or broken, summaries come from the free deterministic template and dictation
+goes in raw. The loop never breaks because a model hiccuped.
+
+Cleanup is deliberately conservative. In local mode it is deterministic
+rules only (fillers, stutters, spoken tokens), which mechanically cannot
+change meaning. The LLM grammar pass runs only in `api` mode with your own
+big model: our testing showed 1B-class local models silently drop clauses
+like "don't touch login.py", so they never get the rewrite job.
 
 ## Permissions (macOS)
 

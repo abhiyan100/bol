@@ -12,11 +12,13 @@ class Summarizer(Protocol):
         ...
 
 
-def build_summarizer(cfg: Config) -> Summarizer:
+def build_summarizer(cfg: Config, engine=None) -> Summarizer:
     from .template import TemplateSummarizer
 
-    if cfg.summarizer.engine == "openrouter" and cfg.openrouter_key:
-        from .openrouter import OpenRouterSummarizer
+    if cfg.summarizer.engine == "auto" and engine is not None:
+        from .llm import LlmSummarizer
 
-        return OpenRouterSummarizer(cfg)
+        # LlmSummarizer checks engine availability per call and falls back
+        # to the template itself, so it's safe even before the engine warms.
+        return LlmSummarizer(cfg, engine)
     return TemplateSummarizer(cfg)

@@ -50,13 +50,39 @@ class TtsConfig:
 
 
 @dataclass
+class LlmConfig:
+    # local: Bol runs a small model on your Mac via mlx_lm.server (no key).
+    # api: any OpenAI-compatible endpoint (OpenRouter, Groq, Ollama, LM
+    #      Studio, OpenAI, Anthropic's compat endpoint) with your own key.
+    # off: deterministic template summaries only, no cleanup.
+    provider: str = "local"  # local | api | off
+    local_model: str = "mlx-community/LFM2.5-1.2B-Instruct-4bit"
+    # Budget alternative for low-RAM Macs: LiquidAI/LFM2.5-350M-MLX-4bit
+    local_port: int = 8771
+    base_url: str = ""  # api provider, e.g. https://openrouter.ai/api/v1
+    api_key_env: str = "BOL_API_KEY"
+    api_model: str = ""
+    temperature: float = 0.3
+
+
+@dataclass
+class CleanupConfig:
+    # Fixes the dictated prompt before injection. Local mode uses instant
+    # deterministic rules (fillers, stutters, "auth dot py" -> "auth.py");
+    # api mode adds an LLM grammar pass by the user's own model. Small local
+    # models are never given the rewrite job (they drop clauses).
+    # off: never. on_command: when you say "clean it up". always: every time.
+    mode: str = "on_command"  # off | on_command | always
+    deadline_s: float = 2.5
+
+
+@dataclass
 class SummarizerConfig:
-    # template: free, deterministic, built from the tool log.
-    # openrouter: persona LLM pass over the template + Claude's last message.
-    engine: str = "template"  # template | openrouter
-    openrouter_model: str = "nvidia/nemotron-3.5-lightning:free"
-    openrouter_api_key: str = ""  # falls back to $OPENROUTER_API_KEY
-    timeout_s: float = 8.0
+    # auto: LLM persona summary when an LLM is available, template otherwise.
+    # template: free, deterministic, built from the tool log. Always the
+    # fallback when the LLM errors or times out.
+    engine: str = "auto"  # auto | template
+    timeout_s: float = 10.0
     user_name: str = ""  # spoken name, e.g. "Abhiyan"
 
 
@@ -78,6 +104,8 @@ class BridgeConfig:
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8770
+    # Shared secret appended to the hook URL; auto-generated on install.
+    token: str = ""
 
 
 @dataclass
@@ -86,6 +114,8 @@ class Config:
     stt: SttConfig = field(default_factory=SttConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
+    llm: LlmConfig = field(default_factory=LlmConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -94,8 +124,10 @@ class Config:
     sound_cues: bool = True
 
     @property
-    def openrouter_key(self) -> str:
-        return self.summarizer.openrouter_api_key or os.environ.get("OPENROUTER_API_KEY", "")
+    def api_key(self) -> str:
+        return os.environ.get(self.llm.api_key_env, "") or os.environ.get(
+            "OPENROUTER_API_KEY", ""
+        )
 
 
 def _apply(section: object, data: dict) -> None:
@@ -111,7 +143,8 @@ def load_config(path: Path | None = None) -> Config:
         with open(path, "rb") as f:
             data = tomllib.load(f)
         for name in (
-            "audio", "stt", "hotkey", "tts", "summarizer", "bridge", "server",
+            "audio", "stt", "hotkey", "tts", "llm", "cleanup", "summarizer",
+            "bridge", "server",
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
@@ -137,9 +170,21 @@ engine = "parakeet"    # or "none" for text-only mode
 [tts]
 engine = "say"         # or "kokoro" (pip install 'bol[kokoro]')
 
+[llm]
+provider = "local"     # local (no key needed) | api (your key) | off
+local_model = "mlx-community/LFM2.5-1.2B-Instruct-4bit"
+# low-RAM Macs: local_model = "LiquidAI/LFM2.5-350M-MLX-4bit"
+# api example (works with OpenRouter, Groq, Ollama, LM Studio, OpenAI):
+# provider = "api"
+# base_url = "https://openrouter.ai/api/v1"
+# api_model = "google/gemini-2.5-flash-lite"
+# api_key_env = "BOL_API_KEY"
+
+[cleanup]
+mode = "on_command"    # say "clean it up" | "always" | "off"
+
 [summarizer]
-engine = "template"    # or "openrouter" for the persona voice
-openrouter_model = "nvidia/nemotron-3.5-lightning:free"
+engine = "auto"        # llm persona when available, template otherwise
 user_name = ""         # your name, spoken in replies
 
 [bridge]
@@ -156,3 +201,19 @@ def write_default_config() -> Path:
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(DEFAULT_CONFIG_TOML)
     return CONFIG_PATH
+
+
+def hook_token() -> str:
+    """Shared secret for the hook URL, generated once and persisted."""
+    import secrets
+
+    path = CONFIG_DIR / "hook_token"
+    if path.exists():
+        token = path.read_text().strip()
+        if token:
+            return token
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(16)
+    path.write_text(token)
+    path.chmod(0o600)
+    return token
