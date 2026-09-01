@@ -133,11 +133,16 @@ Every AI layer degrades gracefully: if the model is still downloading, busy,
 or broken, summaries come from the free deterministic template and dictation
 goes in raw. The loop never breaks because a model hiccuped.
 
-Cleanup is deliberately conservative. In local mode it is deterministic
-rules only (fillers, stutters, spoken tokens), which mechanically cannot
-change meaning. The LLM grammar pass runs only in `api` mode with your own
-big model: our testing showed 1B-class local models silently drop clauses
-like "don't touch login.py", so they never get the rewrite job.
+Cleanup is deliberately conservative. Deterministic rules (fillers,
+stutters, spoken tokens) run first and mechanically cannot change meaning.
+Then [bol-cleanup-350m](https://huggingface.co/abhiyan10/bol-cleanup-350m-4bit),
+**Bol's own model**, polishes grammar in 40-100ms: a 195MB fine-tune trained
+for exactly this job because our testing showed generic 1B-class local
+models silently drop clauses like "don't touch login.py" (94% exact match,
+100% negation and file/flag preservation on held-out eval; full training
+pipeline in [`training/`](training/)). Any failure falls back to the
+deterministic text. In `api` mode your own big model does the polish
+instead.
 
 ## Permissions (macOS)
 

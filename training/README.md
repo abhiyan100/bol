@@ -40,7 +40,7 @@ uv run python -m mlx_lm convert \
 
 ```toml
 [cleanup]
-model = "bol-voice/bol-cleanup-350m-4bit"   # or a local path
+model = "abhiyan10/bol-cleanup-350m-4bit"   # the default; or a local path
 ```
 
 With a cleanup model configured, local-mode "clean it up" uses it instead of
