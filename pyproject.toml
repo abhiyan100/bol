@@ -1,0 +1,37 @@
+[project]
+name = "bol"
+version = "0.1.0"
+description = "Speak. Bol runs Claude Code hands-free: dictate, command, and hear back what happened."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.13"
+authors = [{ name = "Abhiyan Poudel" }]
+keywords = ["claude-code", "voice", "dictation", "hands-free", "stt", "tts"]
+dependencies = [
+    "aiohttp>=3.9",
+    "numpy>=1.26",
+    "sounddevice>=0.4.6",
+    "pynput>=1.7.6",
+    "tomli-w>=1.0",
+]
+
+[project.optional-dependencies]
+stt = ["parakeet-mlx>=0.3"]
+kokoro = ["mlx-audio>=0.2"]
+all = ["parakeet-mlx>=0.3", "mlx-audio>=0.2"]
+
+[project.scripts]
+bol = "bol.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bol"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]

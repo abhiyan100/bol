@@ -1,0 +1,100 @@
+# Bol architecture
+
+## Design goals
+
+1. **The user keeps their normal Claude Code TUI.** Bol never wraps, replaces,
+   or screen-scrapes it — it pastes into the same tmux pane the user watches.
+2. **Exact completion detection, no heuristics.** Claude Code's own hook
+   system reports when a turn ends and what tools ran.
+3. **Local-first, zero recurring cost.** STT, TTS, and the default summarizer
+   all run on-device. Cloud LLM polish is opt-in.
+4. **Every capability is a protocol seam.** STT, TTS, summarizer, and the
+   agent bridge are swappable — that's how a mobile companion, other agents
+   (Codex, Cursor CLI), and better models land later without a rewrite.
+
+## The loop
+
+```
+        ┌──────────────────────────── user ───────────────────────────┐
+        │  holds hotkey / speaks after Bol's reply                    │
+        ▼                                                             ▲
+  Recorder (sounddevice + energy VAD)                       Speaker (say | Kokoro)
+        │ float32 utterance                                           ▲ short reply
+        ▼                                                             │
+  Transcriber (parakeet-mlx)                                Summarizer (template | OpenRouter persona)
+        │ final text                                                  ▲ StopEvent
+        ▼                                                             │
+  grammar.parse_transcript ──► TmuxBridge ──paste+Enter──► Claude ──► HookServer :8770
+   SEND / TYPE / DICTATE /       (pinned pane id)           Code       Stop / PostToolUse /
+   DISCARD / INTERRUPT / …                                             Notification (HTTP hooks)
+```
+
+### Key decisions and their evidence
+
+**tmux injection, never `send-keys` for text.** `send-keys` submits early on
+embedded newlines and mangles `#`, `!`, `$`. Verified empirically: text goes
+in via `load-buffer` + `paste-buffer`, then Enter as a separate `send-keys`
+after a short delay (the TUI otherwise swallows it as part of the paste).
+
+**`pane_current_command` lies.** Claude Code retitles its process to its bare
+version string (`2.1.252`), so pane discovery confirms via `ps -t <pane_tty>`
+looking for a `claude` process on the pane's TTY.
+
+**HTTP hooks, not command hooks.** `{"type": "http", "url": …}` posts every
+event to the loopback daemon with no per-event shell spawn. The `Stop` payload
+carries `last_assistant_message` directly — no transcript JSONL parsing on the
+hot path. `PostToolUse` events are accumulated per `prompt_id` and flushed
+into the `StopEvent`, which is how the summarizer knows what Claude *did*
+rather than just what it *said*. The hook server always answers `{}`
+immediately and processes in the background — Bol observes, never blocks.
+
+**Command words are grammar, not a model.** "send it", "type …", "close" are
+matched by normalizing the utterance tail. A second intent model would add
+latency and a failure mode for zero benefit at this vocabulary size.
+
+**Summarizer is tiered.** Tier 0 (default) is a deterministic template over
+the tool log + Claude's final message: free, instant, and it covers most
+turns, including failure flagging. The OpenRouter persona tier is optional
+polish and *always* falls back to the template on error or rate limit — the
+loop must never go silent because a free API said 429.
+
+**Why not the Agent SDK?** It would kill the interactive TUI and force
+API-key metered billing instead of the user's subscription. Bol drives the
+session the user already has.
+
+**Why not fork FluidVoice?** GPLv3 + ~30 upstream commits/week = permanent
+merge debt, and its strength (dictation UX) is not Bol's differentiator (the
+talk-back loop is). Bol credits it and mirrors its best ideas — the modular
+STT provider protocol especially.
+
+## Module map
+
+| Module | Responsibility |
+|---|---|
+| `bol/daemon.py` | State machine: wires hotkey → record → transcribe → parse → act; hooks → summarize → speak → auto-listen |
+| `bol/bridge/tmux.py` | Pane discovery/pinning/verification, paste injection, key sends |
+| `bol/hooks/server.py` | Loopback aiohttp receiver for hook events |
+| `bol/hooks/events.py` | Typed payload views + per-turn tool accumulation |
+| `bol/hooks/installer.py` | Idempotent settings.json hook install/uninstall |
+| `bol/grammar/commands.py` | Voice-command grammar over final transcripts |
+| `bol/audio/capture.py` | Mic capture; push-to-talk stop or energy-gate endpointing |
+| `bol/stt/` | `Transcriber` protocol; parakeet-mlx implementation |
+| `bol/speak/` | `Speaker` protocol; `say` and Kokoro implementations |
+| `bol/summarize/` | `Summarizer` protocol; template + OpenRouter persona |
+| `bol/config.py` | TOML config, env overrides |
+| `bol/cli.py` | `run`, `talk`, `launch`, `hook`, `doctor`, `config` |
+
+## Testing
+
+- `tests/` — grammar, hook installer, summarizer, turn tracker (pure unit).
+- Live loop verified end-to-end against a real Claude Code session: prompt
+  injected by voice-equivalent text path, Stop hook received, summary spoken.
+- STT verified by synthesizing speech with `say` and asserting the
+  transcription parses to the right action.
+
+## Mobile later
+
+The daemon is already the product; macOS specifics (hotkey, mic, tmux) live
+at the edges. A phone client becomes another front end for the same loop:
+it ships audio in and receives summaries/audio out over an authenticated
+channel, while Claude and the models stay on the Mac.
