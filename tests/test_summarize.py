@@ -34,7 +34,7 @@ async def test_template_mentions_edits_and_failures():
 async def test_template_handles_empty_turn():
     text = await TemplateSummarizer(Config()).summarize(_event(message=""))
     assert text
-    assert "What next" in text
+    assert "What should Claude do next" in text
 
 
 @pytest.mark.asyncio

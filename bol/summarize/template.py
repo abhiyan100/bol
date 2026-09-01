@@ -70,5 +70,5 @@ class TemplateSummarizer:
             body = "Claude's done, but it didn't say much."
         else:
             body = ". ".join(pieces).rstrip(".") + "."
-        ask = f"What next{', ' + self._name if self._name else ''}?"
+        ask = f"What should Claude do next{', ' + self._name if self._name else ''}?"
         return f"{body} {ask}"
