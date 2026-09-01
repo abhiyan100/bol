@@ -21,11 +21,11 @@
   Recorder (sounddevice + energy VAD)                       Speaker (say | Kokoro)
         │ float32 utterance                                           ▲ short reply
         ▼                                                             │
-  Transcriber (parakeet-mlx)                                Summarizer (template | OpenRouter persona)
+  Transcriber (parakeet-mlx)                                Summarizer (LFM2.5 persona | template)
         │ final text                                                  ▲ StopEvent
         ▼                                                             │
-  grammar.parse_transcript ──► TmuxBridge ──paste+Enter──► Claude ──► HookServer :8770
-   SEND / TYPE / DICTATE /       (pinned pane id)           Code       Stop / PostToolUse /
+  grammar.parse_transcript ──► Bridge (focused|tmux) ─paste+Enter─► Claude ─► HookServer :8770
+   SEND / TYPE / DICTATE /       (title-gated)              Code       Stop / PostToolUse /
    DISCARD / INTERRUPT / …                                             Notification (HTTP hooks)
 ```
 
@@ -84,11 +84,10 @@ Enter into a plain shell would execute it. Auto-Enter therefore also requires
 "claude" in the front window title; otherwise Bol types the text, withholds
 Enter, and says so.
 
-**Summarizer is tiered.** Tier 0 (default) is a deterministic template over
-the tool log + Claude's final message: free, instant, and it covers most
-turns, including failure flagging. The OpenRouter persona tier is optional
-polish and *always* falls back to the template on error or rate limit: the
-loop must never go silent because a free API said 429.
+**Summarizer always has a floor.** The deterministic template over the tool
+log + Claude's final message is free, instant, and covers failure flagging.
+The LLM persona (local or api) always falls back to it on error or timeout:
+the loop never goes silent because a model hiccuped.
 
 **Why not the Agent SDK?** It would kill the interactive TUI and force
 API-key metered billing instead of the user's subscription. Bol drives the
@@ -114,7 +113,9 @@ STT provider protocol especially.
 | `bol/audio/capture.py` | Mic capture; push-to-talk stop or energy-gate endpointing |
 | `bol/stt/` | `Transcriber` protocol; parakeet-mlx implementation |
 | `bol/speak/` | `Speaker` protocol; `say` and Kokoro implementations |
-| `bol/summarize/` | `Summarizer` protocol; template + OpenRouter persona |
+| `bol/summarize/` | `Summarizer` protocol; LLM persona + template floor |
+| `bol/llm/` | OpenAI-compatible engine; supervised mlx_lm.server or user endpoint |
+| `bol/cleanup.py` | Deterministic transcript rules + api-mode LLM grammar pass |
 | `bol/config.py` | TOML config, env overrides |
 | `bol/cli.py` | `run`, `talk`, `launch`, `hook`, `doctor`, `config` |
 
