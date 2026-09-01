@@ -2,10 +2,10 @@
 
 **Speak. Bol runs Claude Code hands-free.** · [bol-voice.vercel.app](https://bol-voice.vercel.app)
 
-*Bol* (बोल) means "speak" in Nepali. Hold a key, talk to Claude Code, and,
-unlike every dictation tool, **Bol talks back**: when Claude finishes a turn,
-a summarizer tells you out loud what happened, flags anything that failed,
-and asks what you want to do next. Fully local by default, zero recurring cost.
+Hold a key, talk to Claude Code, and, unlike every dictation tool, **Bol
+talks back**: when Claude finishes a turn, a summarizer tells you out loud
+what happened, flags anything that failed, and asks what you want to do
+next. Fully local by default, zero recurring cost.
 
 ```
 you   (hold right-Option)  "refactor the auth module and run the tests… send it"
@@ -168,3 +168,5 @@ Early but working end-to-end. Roadmap:
   provider design inspired Bol's.
 
 MIT licensed. PRs welcome.
+
+*Bol* (बोल) means "speak" in Nepali.
