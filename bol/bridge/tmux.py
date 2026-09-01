@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-class TmuxError(RuntimeError):
+from .base import BridgeError
+
+
+class TmuxError(BridgeError):
     pass
 
 
@@ -85,8 +88,13 @@ class TmuxBridge:
                 panes.append(ClaudePane(pane_id, target, command))
         return panes
 
-    async def attach(self) -> ClaudePane:
-        """Pin the target pane. Prefers explicit config, else sole discovery."""
+    async def attach(self) -> str:
+        """Pin the target pane. Prefers explicit config, else sole discovery.
+        Returns a human-readable description of the target."""
+        pane = await self._attach_pane()
+        return f"tmux pane {pane.pane_id} ({pane.target})"
+
+    async def _attach_pane(self) -> ClaudePane:
         if self._pinned:
             out = await _tmux(
                 "display-message", "-p", "-t", self._pinned,

@@ -62,9 +62,16 @@ class SummarizerConfig:
 
 @dataclass
 class BridgeConfig:
+    # auto: tmux when a Claude pane exists, else focused-app paste.
+    # focused: always paste into the frontmost terminal (FluidVoice-style).
+    # tmux: always inject into a tmux pane (focus-independent).
+    mode: str = "auto"
     # tmux pane id (e.g. "%3") to pin; empty = auto-discover.
     pane: str = ""
     enter_delay_s: float = 0.2
+    # Focused mode: bundle ids allowed to receive injection (empty = built-in
+    # terminal allowlist). Guard against dictating into the wrong app.
+    allowed_apps: list = field(default_factory=list)
 
 
 @dataclass
@@ -136,7 +143,8 @@ openrouter_model = "nvidia/nemotron-3.5-lightning:free"
 user_name = ""         # your name, spoken in replies
 
 [bridge]
-pane = ""              # tmux pane id like "%3"; empty auto-discovers claude
+mode = "auto"          # auto | focused (paste into front terminal) | tmux
+pane = ""              # tmux mode: pane id like "%3"; empty auto-discovers
 
 [server]
 port = 8770

@@ -94,7 +94,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
     check("macOS", platform.system() == "Darwin", "Bol currently targets macOS")
     check("Apple Silicon", platform.machine() == "arm64",
           "Parakeet STT needs Apple Silicon; use text mode elsewhere")
-    check("tmux installed", shutil.which("tmux") is not None, "brew install tmux")
+    if shutil.which("tmux") is None:
+        print("  [ -- ] tmux not installed (optional; focused mode works without it)")
     check("claude installed", shutil.which("claude") is not None,
           "https://code.claude.com — npm install -g @anthropic-ai/claude-code")
     check("say available", shutil.which("say") is not None)
@@ -122,21 +123,19 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         check("OpenRouter key", bool(cfg.openrouter_key),
               "set OPENROUTER_API_KEY or [summarizer] openrouter_api_key")
 
-    async def _tmux_check() -> tuple[bool, str]:
+    async def _bridge_check() -> str:
         from .bridge import TmuxBridge, TmuxError
 
         try:
             panes = await TmuxBridge().discover()
-        except TmuxError as exc:
-            if "no server running" in str(exc):
-                return False, "tmux isn't running — `bol launch` starts claude in a fresh session"
-            return False, str(exc)
-        if not panes:
-            return False, "no Claude pane found — run `bol launch` or start claude inside tmux"
-        return True, ", ".join(f"{p.pane_id} ({p.target})" for p in panes)
+        except TmuxError:
+            panes = []
+        if panes:
+            listing = ", ".join(f"{p.pane_id} ({p.target})" for p in panes)
+            return f"tmux mode ({listing})"
+        return "focused mode (Bol pastes into your frontmost terminal; no tmux needed)"
 
-    found, detail = asyncio.run(_tmux_check())
-    print(f"  [{'ok ' if found else ' -- '}] Claude pane: {detail}")
+    print(f"  [ok ] injection: {asyncio.run(_bridge_check())}")
 
     print("\nPermissions reminders (macOS prompts on first use):")
     print("  - Microphone: granted to your terminal app on first recording")

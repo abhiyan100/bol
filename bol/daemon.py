@@ -16,7 +16,7 @@ import logging
 import sys
 
 from .audio import Recorder
-from .bridge import TmuxBridge, TmuxError
+from .bridge import BridgeError, build_bridge
 from .config import Config
 from .grammar import Action, parse_transcript
 from .hooks import HookServer, TurnTracker
@@ -32,7 +32,7 @@ class Daemon:
     def __init__(self, cfg: Config, text_mode: bool = False) -> None:
         self.cfg = cfg
         self.text_mode = text_mode
-        self.bridge = TmuxBridge(cfg.bridge.pane, cfg.bridge.enter_delay_s)
+        self.bridge = build_bridge(cfg)
         self.tracker = TurnTracker()
         self.server = HookServer(cfg.server.host, cfg.server.port)
         self.speaker = build_speaker(cfg)
@@ -53,8 +53,8 @@ class Daemon:
     # ---------------------------------------------------------------- lifecycle
 
     async def run(self) -> None:
-        pane = await self.bridge.attach()
-        print(f"bol: attached to Claude in tmux pane {pane.pane_id} ({pane.target})")
+        target = await self.bridge.attach()
+        print(f"bol: injecting into {target}")
 
         self.server.on("Stop", self._on_stop)
         self.server.on("PostToolUse", self._on_tool)
@@ -182,11 +182,11 @@ class Daemon:
                     print("bol: denied.")
                     return True
             return await self._apply(parse_transcript(text))
-        except TmuxError as exc:
-            msg = f"Lost the Claude pane: {exc}"
+        except BridgeError as exc:
+            msg = f"Couldn't reach Claude: {exc}"
             print(f"bol: {msg}")
             await self._speak(msg)
-            return False
+            return True
 
     async def _apply(self, parsed) -> bool:
         action, text = parsed.action, parsed.text

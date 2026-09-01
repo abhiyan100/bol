@@ -31,6 +31,14 @@
 
 ### Key decisions and their evidence
 
+**Injection is a swappable bridge.** Default `auto` picks between two
+backends at startup: `focused` (paste into the frontmost app via pasteboard
+swap + System Events Cmd+V, FluidVoice-style, guarded by a terminal-app
+allowlist so speech can't land in a chat app) and `tmux` (focus-independent
+injection into a pinned pane, used automatically when a Claude pane exists).
+Hooks make completion detection bridge-independent, which is what lets tmux
+be optional.
+
 **tmux injection, never `send-keys` for text.** `send-keys` submits early on
 embedded newlines and mangles `#`, `!`, `$`. Verified empirically: text goes
 in via `load-buffer` + `paste-buffer`, then Enter as a separate `send-keys`
@@ -72,6 +80,8 @@ STT provider protocol especially.
 | Module | Responsibility |
 |---|---|
 | `bol/daemon.py` | State machine: wires hotkey → record → transcribe → parse → act; hooks → summarize → speak → auto-listen |
+| `bol/bridge/base.py` | Bridge protocol + auto-selection |
+| `bol/bridge/focused.py` | Frontmost-app paste injection with terminal allowlist |
 | `bol/bridge/tmux.py` | Pane discovery/pinning/verification, paste injection, key sends |
 | `bol/hooks/server.py` | Loopback aiohttp receiver for hook events |
 | `bol/hooks/events.py` | Typed payload views + per-turn tool accumulation |

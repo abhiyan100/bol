@@ -26,20 +26,23 @@ for how much people want this.
 ## How it works
 
 ```
- hotkey / auto-listen           Claude Code (your normal TUI, in tmux)
+ hotkey / auto-listen           Claude Code (your normal TUI, any terminal)
         │                              ▲                │
         ▼                              │ paste + Enter  │ Stop / PostToolUse /
  mic → Parakeet STT (local)            │                │ Notification hooks
         │                              │                ▼
         ▼                        ┌───────────── bol daemon ─────────────┐
- command grammar ────────────────│  tmux bridge   hook server :8770     │
- "send it" / "type …" / "close"  │  summarizer (free template or LLM)   │
+ command grammar ────────────────│  bridge (focused app / tmux)         │
+ "send it" / "type …" / "close"  │  hook server :8770                   │
+                                 │  summarizer (free template or LLM)   │
                                  │  TTS (macOS say, or local Kokoro)    │
                                  └──────────────────────────────────────┘
 ```
 
-- **You keep your normal Claude Code TUI.** Bol pastes into the same tmux pane
-  you're looking at; dictated text appears in the input box as you speak.
+- **You keep your normal Claude Code TUI.** Bol pastes into the terminal
+  you're looking at (any terminal app, no tmux needed); dictated text appears
+  in the input box as you speak. A guard makes sure speech only ever lands in
+  a terminal, never in your chat apps.
 - **Completion detection is exact**, not screen-scraping: Claude Code's own
   [hooks](https://code.claude.com/docs/en/hooks) post to Bol over loopback
   when a turn ends, including the final message and every tool call made.
@@ -51,8 +54,8 @@ for how much people want this.
 
 ## Install
 
-Requires macOS on Apple Silicon, [tmux](https://formulae.brew.sh/formula/tmux),
-[Claude Code](https://code.claude.com), and [uv](https://docs.astral.sh/uv/).
+Requires macOS on Apple Silicon, [Claude Code](https://code.claude.com), and
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone <this-repo-url> bol && cd bol
@@ -63,13 +66,18 @@ uv run bol doctor            # checks everything, tells you what's missing
 ## Use
 
 ```bash
-uv run bol launch ~/code/myproject   # starts claude in tmux (or use your own tmux)
-tmux attach -t bol                   # your normal Claude Code TUI
-# in a second terminal:
 uv run bol run
 ```
 
-Hold **right Option** and speak. Voice commands ride on your speech:
+That's it. Open Claude Code in any terminal (Terminal, iTerm, Ghostty, Warp,
+VS Code), hold **right Option**, and speak. Bol pastes into the window you're
+looking at.
+
+Want focus-independent injection instead (talk while another app is focused)?
+Run claude inside tmux and Bol auto-switches to pinned-pane mode:
+`uv run bol launch ~/code/myproject`, then `tmux attach -t bol`.
+
+Voice commands ride on your speech:
 
 | You say | Bol does |
 |---|---|
@@ -113,6 +121,8 @@ summarizer whenever the LLM is unavailable, so the loop never breaks.
 - **Microphone**: prompted on first recording, granted to your terminal app.
 - **Input Monitoring**: the global hotkey needs it. System Settings →
   Privacy & Security → Input Monitoring → enable your terminal.
+- **Automation** (focused mode): macOS asks once when Bol first pastes via
+  System Events. Not needed in tmux mode.
 
 ## Status & roadmap
 
