@@ -70,6 +70,7 @@
   .cta-row { margin-top: 32px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
   .install {
     display: flex; align-items: center; gap: 12px;
+    max-width: 100%; min-width: 0;
     background: var(--bg-raise);
     border: 1px solid var(--line);
     border-radius: 8px;
@@ -78,6 +79,7 @@
     transition: border-color .2s;
     font-family: var(--mono); font-size: 13.5px; color: var(--text);
   }
+  #install-text { overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
   .install:hover { border-color: var(--accent-dim); }
   .install:active { transform: translateY(1px); }
   .install .dollar { color: var(--accent); }
@@ -217,9 +219,9 @@
   <h1>Talk to Claude Code.<br><span class="accent">It talks back.</span></h1>
   <p class="sub">Hold a key. Say what you want. Bol types it, sends it, and tells you out loud what Claude did.</p>
   <div class="cta-row">
-    <button class="install" id="install" aria-label="Copy clone command">
+    <button class="install" id="install" aria-label="Copy install command">
       <span class="dollar">$</span>
-      <span id="install-text">git clone https://github.com/abhiyan100/bol</span>
+      <span id="install-text">uv tool install &quot;bol[stt,llm] @ git+https://github.com/abhiyan100/bol&quot;</span>
       <span class="copied" id="copied">copied</span>
     </button>
     <a class="btn" href="https://github.com/abhiyan100/bol">Star on GitHub</a>
@@ -234,9 +236,9 @@
 <section class="wrap reveal">
   <h2>The loop</h2>
   <div class="steps">
-    <div class="step"><b>Hold <span class="k">right &#8997;</span></b><span>Global hotkey. Any app, any time.</span></div>
+    <div class="step"><b>Hold <span class="k">right &#8997;</span></b><span>Global hotkey. Works in any terminal window.</span></div>
     <div class="step"><b>Speak</b><span>Local speech to text. Nothing leaves your Mac.</span></div>
-    <div class="step"><b>Say <span style="color:var(--accent)">"send it"</span></b><span>Bol pastes into your live Claude Code session.</span></div>
+    <div class="step"><b>Say <span style="color:var(--accent)">"send it"</span></b><span>Bol pastes into the Claude Code session you are looking at.</span></div>
     <div class="step"><b>Hear back</b><span>When Claude finishes, Bol speaks a summary and flags failures.</span></div>
   </div>
 </section>
@@ -256,7 +258,7 @@
 <section class="wrap reveal">
   <h2>Built to stay yours</h2>
   <div class="facts">
-    <div class="fact"><b>100% local</b><span>Parakeet speech recognition and Kokoro voices run on your Mac. Your terminal never leaves the room.</span></div>
+    <div class="fact"><b>100% local</b><span>Speech recognition, a 1B summarizer, and the voice all run on your Mac. Nothing leaves it.</span></div>
     <div class="fact"><b>$0</b><span>No API keys required. No subscription. Ever.</span></div>
     <div class="fact"><b>MIT</b><span>Fork it, ship it, make it yours.</span></div>
   </div>
@@ -278,7 +280,7 @@
   const install = document.getElementById('install');
   install.addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText('git clone https://github.com/abhiyan100/bol');
+      await navigator.clipboard.writeText('uv tool install "bol[stt,llm] @ git+https://github.com/abhiyan100/bol"');
       document.getElementById('copied').style.display = 'inline';
       setTimeout(() => document.getElementById('copied').style.display = 'none', 1600);
     } catch (e) {}
