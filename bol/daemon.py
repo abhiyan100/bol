@@ -83,6 +83,7 @@ class Daemon:
 
     def _hotkey_pressed(self) -> None:
         self._asleep = False
+        self.recorder.prepare()
         asyncio.get_running_loop().create_task(self.speaker.stop())
         asyncio.get_running_loop().create_task(self._listen_once(until_silence=False))
 
@@ -111,6 +112,7 @@ class Daemon:
             return
         if self.transcriber is None:
             return
+        self.recorder.prepare()
         await self._listen_once(until_silence=True)
 
     # ---------------------------------------------------------------- actions

@@ -17,8 +17,8 @@ dependencies = [
 
 [project.optional-dependencies]
 stt = ["parakeet-mlx>=0.3"]
-kokoro = ["mlx-audio>=0.2"]
-all = ["parakeet-mlx>=0.3", "mlx-audio>=0.2"]
+kokoro = ["mlx-audio>=0.2", "misaki[en]>=0.6"]
+all = ["parakeet-mlx>=0.3", "mlx-audio>=0.2", "misaki[en]>=0.6"]
 
 [project.scripts]
 bol = "bol.cli:main"

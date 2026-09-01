@@ -28,6 +28,13 @@ class Recorder:
         self._cfg = cfg
         self._stop = asyncio.Event()
 
+    def prepare(self) -> None:
+        """Arm a new recording. MUST be called synchronously from the event
+        that starts it (hotkey press / auto-listen), so a release that lands
+        before record() begins still stops it — clearing inside record()
+        would race and jam the mic open."""
+        self._stop.clear()
+
     def request_stop(self) -> None:
         """Push-to-talk release: end the current recording."""
         self._stop.set()
@@ -36,7 +43,6 @@ class Recorder:
         """Record one utterance; returns float32 mono @ sample_rate, or None
         if nothing above the noise floor was captured."""
         cfg = self._cfg
-        self._stop.clear()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         block = int(cfg.sample_rate * _BLOCK_MS / 1000)
