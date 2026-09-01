@@ -64,12 +64,80 @@ def _suspicious(raw: str, cleaned: str) -> bool:
     return ratio > 1.6 or ratio < 0.5
 
 
+class TunedCleaner:
+    """Bol's own fine-tuned 350M cleanup model, loaded in-process (it's tiny)
+    on first use. Trained on exactly this task, so it gets the rewrite job we
+    refuse to give generic small models."""
+
+    SYSTEM = "Clean this voice dictation for a coding agent. Output only the cleaned text."
+
+    def __init__(self, model: str) -> None:
+        self._model_name = model
+        self._model = None
+        self._tokenizer = None
+
+    def _load(self):
+        if self._model is None:
+            from mlx_lm import load
+
+            log.info("loading cleanup model %s…", self._model_name)
+            self._model, self._tokenizer = load(self._model_name)
+        return self._model, self._tokenizer
+
+    def _generate(self, text: str) -> str:
+        from mlx_lm import generate
+
+        model, tokenizer = self._load()
+        prompt = tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": self.SYSTEM},
+                {"role": "user", "content": text},
+            ],
+            add_generation_prompt=True,
+        )
+        return generate(model, tokenizer, prompt=prompt, max_tokens=120).strip()
+
+    async def warmup(self) -> None:
+        import asyncio
+
+        await asyncio.to_thread(self._load)
+
+    async def clean(self, text: str, deadline_s: float) -> str:
+        import asyncio
+
+        try:
+            out = await asyncio.wait_for(
+                asyncio.to_thread(self._generate, text), timeout=deadline_s
+            )
+        except Exception as exc:
+            log.debug("tuned cleanup skipped (%s)", exc)
+            return text
+        out = out.strip().strip('"')
+        if _suspicious(text, out):
+            log.debug("tuned cleanup rejected: %r -> %r", text, out)
+            return text
+        return out
+
+
+def build_cleaner(cfg) -> TunedCleaner | None:
+    if not cfg.cleanup.model:
+        return None
+    try:
+        import mlx_lm  # noqa: F401
+    except ImportError:
+        log.warning("cleanup model configured but mlx-lm not installed")
+        return None
+    return TunedCleaner(cfg.cleanup.model)
+
+
 async def clean_transcript(
-    engine, text: str, deadline_s: float, use_llm: bool = False
+    engine, text: str, deadline_s: float, use_llm: bool = False, cleaner=None
 ) -> str:
     if len(text) < 8:
         return text
     base = deterministic_clean(text)
+    if cleaner is not None:
+        return await cleaner.clean(base, deadline_s)
     if not use_llm:
         return base
     try:

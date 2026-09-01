@@ -74,6 +74,9 @@ class CleanupConfig:
     # off: never. on_command: when you say "clean it up". always: every time.
     mode: str = "on_command"  # off | on_command | always
     deadline_s: float = 2.5
+    # Bol's own tuned cleanup model (HF repo or local path). When set, local
+    # mode uses it after the deterministic rules; empty = rules only.
+    model: str = ""
 
 
 @dataclass

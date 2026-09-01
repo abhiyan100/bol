@@ -17,7 +17,7 @@ import sys
 
 from .audio import Recorder
 from .bridge import BridgeError, build_bridge
-from .cleanup import CLEANUP_SYSTEM, clean_transcript
+from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
 from .config import Config, hook_token
 from .grammar import Action, parse_transcript
 from .hooks import HookServer, TurnTracker
@@ -39,6 +39,7 @@ class Daemon:
         self.server = HookServer(cfg.server.host, cfg.server.port, hook_token())
         self.speaker = build_speaker(cfg)
         self.engine = LLMEngine(cfg)
+        self.cleaner = build_cleaner(cfg)
         self.summarizer = build_summarizer(cfg, self.engine)
         self.recorder = Recorder(cfg.audio)
         self.transcriber = None if text_mode else build_transcriber(cfg)
@@ -217,6 +218,7 @@ class Daemon:
                 text,
                 self.cfg.cleanup.deadline_s,
                 use_llm=self.cfg.llm.provider == "api",
+                cleaner=self.cleaner,
             )
             if cleaned != text:
                 print(f"bol: cleaned -> {cleaned}")
