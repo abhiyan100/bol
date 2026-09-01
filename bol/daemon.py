@@ -42,6 +42,10 @@ class Daemon:
         self.hotkey: HotkeyListener | None = None
 
         self._listen_lock = asyncio.Lock()
+        self._pending_listen = False
+        self._active_session = None
+        self._active_hands_free = False
+        self._ptt_session = None
         self._asleep = False
         self._last_reply = ""
         self._awaiting_permission = False
@@ -83,44 +87,87 @@ class Daemon:
 
     def _hotkey_pressed(self) -> None:
         self._asleep = False
-        self.recorder.prepare()
-        asyncio.get_running_loop().create_task(self.speaker.stop())
-        asyncio.get_running_loop().create_task(self._listen_once(until_silence=False))
+        # The session token is minted HERE, synchronously, so a release that
+        # lands before recording starts still stops exactly this session.
+        session = self.recorder.begin()
+        self._ptt_session = session
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.speaker.stop())  # barge-in over TTS
+        # Barge-in over a hands-free recording: it yields to the hotkey, and
+        # the press waits for the mic instead of being dropped.
+        if self._active_session is not None and self._active_hands_free:
+            self._active_session.request_stop()
+        loop.create_task(self._listen_session(session, until_silence=False))
 
     def _hotkey_released(self) -> None:
-        self.recorder.request_stop()
+        # Stops only its own session — inert if that press never got the mic.
+        if self._ptt_session is not None:
+            self._ptt_session.request_stop()
+            self._ptt_session = None
 
-    async def _listen_once(self, until_silence: bool) -> None:
-        if self._listen_lock.locked():
-            return
-        async with self._listen_lock:
+    async def _listen_session(self, session, until_silence: bool) -> None:
+        """Own the mic for one recording, then keep it open across hands-free
+        follow-ups (the reopen loop — chaining must happen here, not via a
+        nested call that would deadlock on our own lock)."""
+        if self._pending_listen:
+            return  # one queued press is enough; drop extras
+        self._pending_listen = True
+        try:
+            async with self._listen_lock:
+                self._pending_listen = False
+                while True:
+                    reopen = await self._capture_and_handle(session, until_silence)
+                    if (
+                        not reopen
+                        or not self.cfg.hands_free
+                        or self._asleep
+                        or self.transcriber is None
+                    ):
+                        break
+                    session = self.recorder.begin()
+                    until_silence = True
+        finally:
+            self._pending_listen = False
+
+    async def _capture_and_handle(self, session, until_silence: bool) -> bool:
+        self._active_session = session
+        self._active_hands_free = until_silence
+        try:
             if self.cfg.sound_cues:
                 await play_cue("listen")
-            audio = await self.recorder.record(until_silence=until_silence)
+            audio = await self.recorder.record(session, until_silence=until_silence)
             if audio is None:
                 log.debug("no speech captured")
-                return
+                return False
             assert self.transcriber is not None
             text = await self.transcriber.transcribe(audio, self.cfg.audio.sample_rate)
             if not text:
-                return
+                return False
             print(f"you: {text}")
-            await self._handle_utterance(text)
+            return await self._handle_utterance(text)
+        finally:
+            self._active_session = None
 
     async def _auto_listen(self) -> None:
+        """Reopen the mic after Bol speaks (hook-driven). No-op if a listen
+        is already running or queued."""
         if not self.cfg.hands_free or self._asleep or self.text_mode:
             return
         if self.transcriber is None:
             return
-        self.recorder.prepare()
-        await self._listen_once(until_silence=True)
+        if self._listen_lock.locked() or self._pending_listen:
+            return
+        await self._listen_session(self.recorder.begin(), until_silence=True)
 
     # ---------------------------------------------------------------- actions
 
     _YES = {"yes", "yeah", "yep", "approve", "go ahead", "do it"}
     _NO = {"no", "nope", "deny", "don't", "dont"}
 
-    async def _handle_utterance(self, text: str) -> None:
+    async def _handle_utterance(self, text: str) -> bool:
+        """Act on one utterance. Returns True if the mic should reopen
+        immediately (hands-free chaining), False if the turn passed to Claude
+        or the loop should go quiet."""
         try:
             if self._awaiting_permission:
                 norm = text.strip().lower().rstrip(".!,")
@@ -128,49 +175,53 @@ class Daemon:
                     self._awaiting_permission = False
                     await self.bridge.inject_keys("Enter")
                     print("bol: approved.")
-                    return
+                    return False
                 if norm in self._NO:
                     self._awaiting_permission = False
                     await self.bridge.inject_keys("Escape")
                     print("bol: denied.")
-                    await self._auto_listen()
-                    return
-            await self._apply(parse_transcript(text))
+                    return True
+            return await self._apply(parse_transcript(text))
         except TmuxError as exc:
             msg = f"Lost the Claude pane: {exc}"
             print(f"bol: {msg}")
             await self._speak(msg)
+            return False
 
-    async def _apply(self, parsed) -> None:
+    async def _apply(self, parsed) -> bool:
         action, text = parsed.action, parsed.text
         if action is Action.DICTATE:
             await self.bridge.inject(text + " ", submit=False)
-            await self._auto_listen()
-        elif action is Action.TYPE:
+            return True
+        if action is Action.TYPE:
             await self.bridge.inject(text, submit=False)
-            await self._auto_listen()
-        elif action is Action.SEND:
+            return True
+        if action is Action.SEND:
             self._awaiting_permission = False
             await self.bridge.inject(text, submit=True)
             if self.cfg.sound_cues:
                 await play_cue("done")
             print("bol: sent — Claude's turn.")
-        elif action is Action.DISCARD:
+            return False
+        if action is Action.DISCARD:
             # C-u wipes Claude Code's input line.
             await self.bridge.inject_keys("C-u")
             if self.cfg.sound_cues:
                 await play_cue("discard")
-            await self._auto_listen()
-        elif action is Action.INTERRUPT:
+            return True
+        if action is Action.INTERRUPT:
             await self.bridge.interrupt()
             await self._speak("Interrupted.")
-        elif action is Action.SLEEP:
+            return True
+        if action is Action.SLEEP:
             self._asleep = True
             print("bol: sleeping — press the hotkey when you need me.")
-        elif action is Action.REPEAT:
+            return False
+        if action is Action.REPEAT:
             if self._last_reply:
                 await self._speak(self._last_reply)
-            await self._auto_listen()
+            return True
+        return False
 
     async def _speak(self, text: str) -> None:
         self._last_reply = text

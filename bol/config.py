@@ -20,6 +20,8 @@ class AudioConfig:
     # Utterances shorter than this are discarded as noise.
     min_speech_ms: int = 300
     max_utterance_s: int = 90
+    # Hands-free reopen: give up if no speech starts within this window.
+    listen_window_s: int = 8
     # RMS multiplier over measured noise floor that counts as speech.
     energy_threshold: float = 3.0
 

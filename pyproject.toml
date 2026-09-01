@@ -17,8 +17,25 @@ dependencies = [
 
 [project.optional-dependencies]
 stt = ["parakeet-mlx>=0.3"]
-kokoro = ["mlx-audio>=0.2", "misaki[en]>=0.6"]
-all = ["parakeet-mlx>=0.3", "mlx-audio>=0.2", "misaki[en]>=0.6"]
+# misaki's G2P needs spacy + friends; we list them directly instead of
+# misaki[en] because that extra drags in torch (~500MB) via
+# spacy-curated-transformers, which the mlx pipeline never uses.
+# The en_core_web_sm wheel is pinned so first synthesis never falls back to
+# a blocking spacy.cli.download() (which fails offline).
+kokoro = [
+    "mlx-audio>=0.2",
+    "misaki>=0.6",
+    "spacy>=3.8,<3.9",
+    "num2words",
+    "phonemizer-fork",
+    "espeakng-loader",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+]
+all = ["bol[stt,kokoro]"]
+
+[tool.uv]
+# Bol is a macOS tool; keep Linux/CUDA wheels out of the lock.
+environments = ["sys_platform == 'darwin'"]
 
 [project.scripts]
 bol = "bol.cli:main"
@@ -29,6 +46,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["bol"]
+
+[tool.hatch.metadata]
+# The pinned en_core_web_sm wheel URL in the kokoro extra needs this.
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
