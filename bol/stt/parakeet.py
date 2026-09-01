@@ -1,4 +1,4 @@
-"""Parakeet TDT via parakeet-mlx — the low-latency local engine FluidVoice
+"""Parakeet TDT via parakeet-mlx, the low-latency local engine FluidVoice
 ships. ~0.05 RTF on Apple Silicon; model downloads once from Hugging Face."""
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class ParakeetTranscriber:
         if self._model is None:
             from parakeet_mlx import from_pretrained
 
-            log.info("loading Parakeet model %s…", self._model_name)
+            log.info("loading Parakeet model %s ...", self._model_name)
             self._model = from_pretrained(self._model_name)
         return self._model
 

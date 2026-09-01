@@ -1,4 +1,4 @@
-"""Kokoro-82M speaker via mlx-audio — local neural TTS, Apache-2.0 model.
+"""Kokoro-82M speaker via mlx-audio: local neural TTS, Apache-2.0 model.
 
 Loaded lazily in a worker thread: model init costs a few seconds once, then
 generation is faster than real-time on Apple Silicon.
@@ -13,6 +13,7 @@ import numpy as np
 import sounddevice as sd
 
 from ..config import Config
+from .base import clamp_speech
 
 log = logging.getLogger("bol.speak")
 
@@ -50,7 +51,7 @@ class KokoroSpeaker:
 
     async def speak(self, text: str) -> None:
         async with self._lock:
-            audio, rate = await asyncio.to_thread(self._generate, text)
+            audio, rate = await asyncio.to_thread(self._generate, clamp_speech(text))
             if audio.size == 0:
                 return
             self._playing = True

@@ -30,11 +30,44 @@ def test_deterministic_preserves_negation():
     assert "don't touch login.py" in out
 
 
+class FakeCleaner:
+    """Stands in for the tuned local model."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def clean(self, text, deadline_s):
+        self.calls.append(text)
+        return text + " [tuned]"
+
+
 @pytest.mark.asyncio
 async def test_local_mode_never_calls_llm():
     engine = FakeEngine(error=True)  # would raise if called
     out = await clean_transcript(engine, "um fix the the login bug", 2.0, use_llm=False)
     assert out == "Fix the login bug"
+
+
+@pytest.mark.asyncio
+async def test_local_mode_uses_tuned_cleaner_not_llm():
+    engine = FakeEngine(error=True)  # would raise if called
+    cleaner = FakeCleaner()
+    out = await clean_transcript(
+        engine, "um fix the the login bug", 2.0, use_llm=False, cleaner=cleaner
+    )
+    assert cleaner.calls == ["Fix the login bug"]
+    assert out == "Fix the login bug [tuned]"
+
+
+@pytest.mark.asyncio
+async def test_api_mode_prefers_llm_over_tuned_cleaner():
+    engine = FakeEngine(reply="Fix the login bug.")
+    cleaner = FakeCleaner()
+    out = await clean_transcript(
+        engine, "um fix the the login bug", 2.0, use_llm=True, cleaner=cleaner
+    )
+    assert cleaner.calls == []       # the small model stays out of the way
+    assert out == "Fix the login bug."
 
 
 @pytest.mark.asyncio

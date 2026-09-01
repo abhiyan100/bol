@@ -1,10 +1,12 @@
 """Global hotkey via pynput.
 
 macOS: the terminal app running Bol needs Input Monitoring permission
-(System Settings → Privacy & Security → Input Monitoring). `bol doctor`
-checks reachability.
+(System Settings > Privacy & Security > Input Monitoring). Without it pynput
+still starts cleanly and simply never delivers a key, so start() checks
+IS_TRUSTED and raises PermissionError with the fix rather than leaving a
+hotkey that looks armed and is dead.
 
-push_to_talk: key down → on_press, key up → on_release.
+push_to_talk: key down calls on_press, key up calls on_release.
 toggle:       each tap alternates on_press / on_release.
 """
 
@@ -20,12 +22,30 @@ from ..config import HotkeyConfig
 
 log = logging.getLogger("bol.hotkey")
 
+# Enough of the pynput vocabulary to fix a typo without opening its docs.
+_KEY_EXAMPLES = "alt_r, alt_l, cmd_r, ctrl_r, shift_r, f13"
+
+NOT_TRUSTED = (
+    "Input Monitoring is off, so the hotkey can't fire. "
+    "System Settings > Privacy & Security > Input Monitoring > enable your "
+    "terminal app, then restart Bol."
+)
+
 
 def _resolve(name: str):
+    """Config key name to a pynput key. Raises on anything pynput doesn't
+    know: KeyCode.from_char() validates nothing, so a typo like
+    "right_option" would silently match no key for the whole session."""
     try:
-        return getattr(keyboard.Key, name)
-    except AttributeError:
+        return keyboard.Key[name]
+    except KeyError:
+        pass
+    if len(name) == 1:
         return keyboard.KeyCode.from_char(name)
+    raise ValueError(
+        f"unknown hotkey key {name!r}. Use a named key ({_KEY_EXAMPLES}) "
+        "or a single character."
+    )
 
 
 class HotkeyListener:
@@ -63,11 +83,18 @@ class HotkeyListener:
             self._loop.call_soon_threadsafe(self._on_release)
 
     def start(self) -> None:
-        self._listener = keyboard.Listener(
+        listener = keyboard.Listener(
             on_press=self._handle_press, on_release=self._handle_release
         )
-        self._listener.daemon = True
-        self._listener.start()
+        listener.daemon = True
+        listener.start()
+        # wait() returns once the backend has set up (or failed to set up) its
+        # event tap; IS_TRUSTED is only meaningful after that.
+        listener.wait()
+        if not getattr(listener, "IS_TRUSTED", True):
+            listener.stop()
+            raise PermissionError(NOT_TRUSTED)
+        self._listener = listener
         log.info("hotkey armed: %s (%s)", self._cfg.key, self._cfg.mode)
 
     def stop(self) -> None:

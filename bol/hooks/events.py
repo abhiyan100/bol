@@ -10,7 +10,7 @@ Payload shapes verified against Claude Code 2.1.252:
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 
@@ -62,16 +62,35 @@ def _tool_ok(tool_response: object) -> bool:
     return True
 
 
+# A turn whose Stop never arrives (interrupted, crashed, a session Bol isn't
+# following) would otherwise keep its tool list for the life of the process.
+MAX_TURNS = 32
+MAX_TOOLS_PER_TURN = 200
+
+
 class TurnTracker:
-    """Accumulates PostToolUse events until the matching Stop arrives."""
+    """Accumulates PostToolUse events until the matching Stop arrives.
+
+    Bounded on both axes: the oldest turn is evicted past MAX_TURNS, and each
+    turn keeps a rolling window of its most recent tool calls.
+    """
 
     def __init__(self) -> None:
-        self._tools: dict[str, list[ToolUse]] = defaultdict(list)
+        self._tools: OrderedDict[str, list[ToolUse]] = OrderedDict()
 
     def record_tool(self, payload: dict) -> None:
         key = payload.get("prompt_id") or payload.get("session_id") or "?"
+        tools = self._tools.get(key)
+        if tools is None:
+            tools = self._tools[key] = []
+            while len(self._tools) > MAX_TURNS:
+                self._tools.popitem(last=False)  # the key just added is newest
+        else:
+            self._tools.move_to_end(key)
+        if len(tools) >= MAX_TOOLS_PER_TURN:
+            del tools[0]
         tool_input = payload.get("tool_input") or {}
-        self._tools[key].append(
+        tools.append(
             ToolUse(
                 tool_name=payload.get("tool_name", "?"),
                 detail=_tool_detail(tool_input if isinstance(tool_input, dict) else {}),

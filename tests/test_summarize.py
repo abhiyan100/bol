@@ -2,6 +2,7 @@ import pytest
 
 from bol.config import Config
 from bol.hooks.events import StopEvent, ToolUse, TurnTracker
+from bol.speak.base import SPEECH_LIMIT, clamp_speech
 from bol.summarize.template import TemplateSummarizer, describe_tools
 
 
@@ -42,6 +43,33 @@ async def test_markdown_stripped_from_spoken_text():
     msg = "**Done!** I edited `auth.py`.\n```py\nprint(1)\n```\nTests pass."
     text = await TemplateSummarizer(Config()).summarize(_event(message=msg))
     assert "`" not in text and "*" not in text
+
+
+@pytest.mark.asyncio
+async def test_punctuationless_dump_is_capped():
+    # A markdown table has no sentence punctuation, so the sentence split
+    # used to hand the whole 20KB back and `say` read it for ~9 minutes.
+    row = "| src/handlers/user_profile_controller.py | 412 | ok |\n"
+    msg = "| file | lines | status |\n|---|---|---|\n" + row * 400
+    assert len(msg) > 20_000
+    text = await TemplateSummarizer(Config()).summarize(_event(message=msg))
+    assert len(text) < 600
+    assert "and more" in text
+
+
+@pytest.mark.asyncio
+async def test_short_message_is_not_truncated():
+    text = await TemplateSummarizer(Config()).summarize(_event(message="All good."))
+    assert "and more" not in text
+    assert "All good." in text
+
+
+def test_clamp_speech_is_the_last_line_of_defence():
+    assert clamp_speech("short") == "short"
+    long = "word " * 500
+    out = clamp_speech(long)
+    assert len(out) <= SPEECH_LIMIT + len(", and more")
+    assert out.endswith(", and more")
 
 
 def test_describe_tools_many_files():

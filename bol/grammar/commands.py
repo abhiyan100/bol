@@ -1,6 +1,6 @@
 """Trailing/leading voice-command grammar.
 
-Commands ride on the final transcript itself — no second model, no intent
+Commands ride on the final transcript itself, no second model, no intent
 classifier. A short fuzzy match against the last few words decides what to do,
 mirroring the infina.so UX ("say 'send'", "say 'type ...'"):
 

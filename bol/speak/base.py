@@ -15,6 +15,20 @@ _CUES = {
 }
 
 
+# Belt and braces behind the summarizer's own cap: whatever a summarizer or
+# an LLM hands over, never read more than this aloud.
+SPEECH_LIMIT = 600
+
+
+def clamp_speech(text: str, limit: int = SPEECH_LIMIT) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.")
+    log.debug("clamped %d characters of speech to %d", len(text), limit)
+    return f"{cut or text[:limit]}, and more"
+
+
 class Speaker(Protocol):
     async def speak(self, text: str) -> None: ...
     async def stop(self) -> None: ...

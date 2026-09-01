@@ -17,13 +17,16 @@ class AudioConfig:
     channels: int = 1
     # Energy-gate endpointing: stop capture after this much trailing silence.
     silence_ms: int = 900
-    # Utterances shorter than this are discarded as noise.
+    # Hands-free only: utterances shorter than this are discarded as noise.
+    # Push-to-talk returns everything captured while the key is held.
     min_speech_ms: int = 300
     max_utterance_s: int = 90
     # Hands-free reopen: give up if no speech starts within this window.
     listen_window_s: int = 8
     # RMS multiplier over measured noise floor that counts as speech.
     energy_threshold: float = 3.0
+    # Mic to record from: device index or name substring; empty = system default.
+    input_device: str = ""
 
 
 @dataclass
@@ -109,6 +112,13 @@ class ServerConfig:
     port: int = 8770
     # Shared secret appended to the hook URL; auto-generated on install.
     token: str = ""
+    # Claude Code hooks are user-scoped, so every session on this machine
+    # posts here. first: narrate only the first session Bol hears from.
+    # all: narrate every session (replies will interleave).
+    follow: str = "first"  # first | all
+    # /hook types into your terminal, so it stays on loopback unless you
+    # deliberately open it up.
+    allow_remote: bool = False
 
 
 @dataclass
@@ -177,6 +187,9 @@ key = "alt_r"          # right Option
 # discard = ["forget it"]
 # interrupt = ["whoa whoa"]
 
+[audio]
+# input_device = "MacBook Pro Microphone"  # mic name substring or index; empty = system default
+
 [stt]
 engine = "parakeet"    # or "none" for text-only mode
 
@@ -207,6 +220,8 @@ pane = ""              # tmux mode: pane id like "%3"; empty auto-discovers
 
 [server]
 port = 8770
+# follow = "first"      # narrate one Claude Code session at a time; "all" narrates every session
+# allow_remote = false  # true lets the hook server bind off loopback (your network can type into your terminal)
 """
 
 

@@ -83,6 +83,14 @@ def test_clean_without_send_dictates():
     assert p.clean is True
 
 
+def test_bare_clean_command_has_no_text():
+    # Nothing to clean and nothing to inject; the daemon skips empty text.
+    p = parse_transcript("clean it up")
+    assert p.action is Action.DICTATE
+    assert p.text == ""
+    assert p.clean is True
+
+
 def test_send_without_clean_flag():
     p = parse_transcript("fix the bug send it")
     assert p.clean is False

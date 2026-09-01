@@ -80,7 +80,7 @@ class TunedCleaner:
         if self._model is None:
             from mlx_lm import load
 
-            log.info("loading cleanup model %s…", self._model_name)
+            log.info("loading cleanup model %s ...", self._model_name)
             self._model, self._tokenizer = load(self._model_name)
         return self._model, self._tokenizer
 
@@ -136,7 +136,9 @@ async def clean_transcript(
     if len(text) < 8:
         return text
     base = deterministic_clean(text)
-    if cleaner is not None:
+    # The tuned local model handles the polish only when there is no better
+    # option; in api mode the user's own big model does it instead.
+    if cleaner is not None and not use_llm:
         return await cleaner.clean(base, deadline_s)
     if not use_llm:
         return base

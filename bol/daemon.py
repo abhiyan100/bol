@@ -14,9 +14,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
 from .audio import Recorder
 from .bridge import BridgeError, build_bridge
+from .bridge.focused import SubmitBlocked
 from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
 from .config import Config, hook_token
 from .grammar import Action, Grammar
@@ -30,6 +32,19 @@ from .summarize import build_summarizer
 log = logging.getLogger("bol")
 
 
+def _drain(task: asyncio.Task) -> None:
+    """Collect a fire-and-forget task's exception.
+
+    Without this a failure surfaces only as asyncio's "Task exception was
+    never retrieved" on shutdown, long after the feature went quietly dead.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("background task failed: %s", exc)
+
+
 class Daemon:
     def __init__(self, cfg: Config, text_mode: bool = False) -> None:
         self.cfg = cfg
@@ -37,7 +52,12 @@ class Daemon:
         self.bridge = build_bridge(cfg)
         self.grammar = Grammar(cfg.commands)
         self.tracker = TurnTracker()
-        self.server = HookServer(cfg.server.host, cfg.server.port, hook_token())
+        self.server = HookServer(
+            cfg.server.host,
+            cfg.server.port,
+            hook_token(),
+            allow_remote=cfg.server.allow_remote,
+        )
         self.speaker = build_speaker(cfg)
         self.engine = LLMEngine(cfg)
         self.cleaner = build_cleaner(cfg)
@@ -47,13 +67,23 @@ class Daemon:
         self.hotkey: HotkeyListener | None = None
 
         self._listen_lock = asyncio.Lock()
+        # Hook handlers run as independent tasks; without this a Stop and a
+        # Notification landing together cut each other off mid-sentence.
+        self._speak_lock = asyncio.Lock()
         self._pending_listen = False
         self._active_session = None
         self._active_hands_free = False
         self._ptt_session = None
         self._asleep = False
         self._last_reply = ""
-        self._awaiting_permission = False
+        # Claude Code hooks are user-scoped, so every session on this machine
+        # posts here. Bol latches onto one (see [server] follow).
+        self._bound_session: str | None = None
+        self._bound_cwd = ""
+        self._warned_other_session = False
+        # Which session raised the permission prompt we're waiting on, so a
+        # spoken "yes" can never approve a different session's prompt.
+        self._permission_session: str | None = None
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -65,10 +95,15 @@ class Daemon:
         self.server.on("PostToolUse", self._on_tool)
         self.server.on("Notification", self._on_notification)
         await self.server.start()
+        loop = asyncio.get_running_loop()
         # LLM warms in the background; template/raw fallbacks cover the gap
         # (and the first run's model download).
-        engine_task = asyncio.get_running_loop().create_task(self.engine.start())
-        engine_task.add_done_callback(lambda t: t.exception())
+        loop.create_task(self.engine.start()).add_done_callback(_drain)
+        # Same for the cleanup model: cold, the first "clean it up" spends its
+        # whole deadline loading weights and hands back the text unchanged.
+        warmup = getattr(self.cleaner, "warmup", None)
+        if callable(warmup):
+            loop.create_task(warmup()).add_done_callback(_drain)
         print(f"bol: hook server on http://{self.cfg.server.host}:{self.cfg.server.port}/hook")
 
         if self.transcriber is not None:
@@ -76,7 +111,7 @@ class Daemon:
             await self.transcriber.warmup()
 
         if self.text_mode or self.transcriber is None:
-            print("bol: text mode — type what you'd say ('send it', 'type …', 'close').")
+            print("bol: text mode. Type what you'd say ('send it', 'type ...', 'close').")
             await self._text_console()
             return
 
@@ -111,22 +146,23 @@ class Daemon:
         session = self.recorder.begin()
         self._ptt_session = session
         loop = asyncio.get_running_loop()
-        loop.create_task(self.speaker.stop())  # barge-in over TTS
+        loop.create_task(self.speaker.stop()).add_done_callback(_drain)  # barge-in over TTS
         # Barge-in over a hands-free recording: it yields to the hotkey, and
         # the press waits for the mic instead of being dropped.
         if self._active_session is not None and self._active_hands_free:
             self._active_session.request_stop()
-        loop.create_task(self._listen_session(session, until_silence=False))
+        listen = loop.create_task(self._listen_session(session, until_silence=False))
+        listen.add_done_callback(_drain)
 
     def _hotkey_released(self) -> None:
-        # Stops only its own session — inert if that press never got the mic.
+        # Stops only its own session, inert if that press never got the mic.
         if self._ptt_session is not None:
             self._ptt_session.request_stop()
             self._ptt_session = None
 
     async def _listen_session(self, session, until_silence: bool) -> None:
         """Own the mic for one recording, then keep it open across hands-free
-        follow-ups (the reopen loop — chaining must happen here, not via a
+        follow-ups (the reopen loop: chaining must happen here, not via a
         nested call that would deadlock on our own lock)."""
         if self._pending_listen:
             return  # one queued press is enough; drop extras
@@ -152,14 +188,27 @@ class Daemon:
         self._active_session = session
         self._active_hands_free = until_silence
         try:
-            if self.cfg.sound_cues:
-                await play_cue("listen")
-            audio = await self.recorder.record(session, until_silence=until_silence)
+            try:
+                if self.cfg.sound_cues:
+                    await play_cue("listen")
+                audio = await self.recorder.record(session, until_silence=until_silence)
+            except Exception as exc:
+                # A dead input device (headphones unplugged, another app
+                # grabbing the mic) used to surface only as an unretrieved
+                # task exception, leaving the hotkey silently dead forever.
+                log.warning("capture failed: %s", exc)
+                await self._speak("Lost the microphone. Check your input device.")
+                return False
             if audio is None:
                 log.debug("no speech captured")
                 return False
             assert self.transcriber is not None
-            text = await self.transcriber.transcribe(audio, self.cfg.audio.sample_rate)
+            try:
+                text = await self.transcriber.transcribe(audio, self.cfg.audio.sample_rate)
+            except Exception as exc:
+                log.warning("transcription failed: %s", exc)
+                await self._speak("Couldn't transcribe that one. Try again.")
+                return False
             if not text:
                 return False
             print(f"you: {text}")
@@ -188,24 +237,45 @@ class Daemon:
         immediately (hands-free chaining), False if the turn passed to Claude
         or the loop should go quiet."""
         try:
-            if self._awaiting_permission:
+            if self._permission_session is not None:
                 norm = text.strip().lower().rstrip(".!,")
                 if norm in self._YES:
-                    self._awaiting_permission = False
-                    await self.bridge.inject_keys("Enter")
-                    print("bol: approved.")
-                    return False
+                    return await self._answer_permission(approve=True)
                 if norm in self._NO:
-                    self._awaiting_permission = False
-                    await self.bridge.inject_keys("Escape")
-                    print("bol: denied.")
-                    return True
+                    return await self._answer_permission(approve=False)
             return await self._apply(self.grammar.parse(text))
-        except BridgeError as exc:
-            msg = f"Couldn't reach Claude: {exc}"
-            print(f"bol: {msg}")
-            await self._speak(msg)
+        except SubmitBlocked as exc:
+            # The text WAS typed; only the Enter was withheld.
+            log.info("submit withheld: %s", exc)
+            await self._speak(
+                "Typed it, but that window doesn't look like Claude, "
+                "so I didn't press Enter."
+            )
             return True
+        except BridgeError as exc:
+            await self._speak(f"Couldn't reach Claude: {exc}")
+            return True
+
+    async def _answer_permission(self, approve: bool) -> bool:
+        """Answer the permission prompt Bol actually announced.
+
+        Enter goes to whichever terminal is frontmost, so approving a prompt
+        raised by a session Bol isn't narrating would approve the wrong thing.
+        """
+        session = self._permission_session or ""
+        self._permission_session = None
+        if not self._follows(session):
+            await self._speak(
+                "That prompt came from another Claude Code session, so I left it alone."
+            )
+            return True
+        if approve:
+            await self.bridge.inject_keys("Enter")
+            print("bol: approved.")
+            return False
+        await self.bridge.inject_keys("Escape")
+        print("bol: denied.")
+        return True
 
     async def _apply(self, parsed) -> bool:
         action, text = parsed.action, parsed.text
@@ -224,18 +294,21 @@ class Daemon:
             if cleaned != text:
                 print(f"bol: cleaned -> {cleaned}")
                 text = cleaned
-        if action is Action.DICTATE:
-            await self.bridge.inject(text + " ", submit=False)
-            return True
-        if action is Action.TYPE:
-            await self.bridge.inject(text, submit=False)
+        if action in (Action.DICTATE, Action.TYPE):
+            # A bare "clean it up" parses as DICTATE with no text; injecting
+            # a lone space would litter Claude's input box.
+            if not text:
+                return True
+            await self.bridge.inject(
+                text + " " if action is Action.DICTATE else text, submit=False
+            )
             return True
         if action is Action.SEND:
-            self._awaiting_permission = False
+            self._permission_session = None
             await self.bridge.inject(text, submit=True)
             if self.cfg.sound_cues:
                 await play_cue("done")
-            print("bol: sent — Claude's turn.")
+            print("bol: sent. Claude's turn.")
             return False
         if action is Action.DISCARD:
             # C-u wipes Claude Code's input line.
@@ -249,7 +322,7 @@ class Daemon:
             return True
         if action is Action.SLEEP:
             self._asleep = True
-            print("bol: sleeping — press the hotkey when you need me.")
+            print("bol: sleeping. Press the hotkey when you need me.")
             return False
         if action is Action.REPEAT:
             if self._last_reply:
@@ -258,25 +331,73 @@ class Daemon:
         return False
 
     async def _speak(self, text: str) -> None:
-        self._last_reply = text
-        print(f"bol: {text}")
-        await self.speaker.speak(text)
+        # Serialized so two hook handlers can't cut each other off; barge-in
+        # still works because the hotkey calls speaker.stop() directly.
+        async with self._speak_lock:
+            self._last_reply = text
+            print(f"bol: {text}")
+            await self.speaker.speak(text)
+
+    # ---------------------------------------------------------------- sessions
+
+    def _follows(self, session_id: str, cwd: str = "") -> bool:
+        """Whether this hook event belongs to the session Bol is narrating.
+
+        Claude Code hooks are user-scoped, so a second `claude` in another
+        terminal posts here too. Left unfiltered, each session's Stop cuts the
+        previous summary off mid-sentence and reopens the mic, and a "yes"
+        meant for one prompt approves whichever terminal is frontmost. Bol
+        latches onto the first session it hears from; [server] follow = "all"
+        opts back into narrating every session.
+        """
+        if self.cfg.server.follow == "all" or not session_id:
+            return True
+        if self._bound_session is None:
+            self._bound_session = session_id
+            self._bound_cwd = cwd
+            print(f"bol: narrating {self._session_label()}.")
+            return True
+        if session_id == self._bound_session:
+            if cwd and not self._bound_cwd:
+                self._bound_cwd = cwd
+            return True
+        if not self._warned_other_session:
+            self._warned_other_session = True
+            print(
+                "bol: another Claude Code session is running; Bol is only "
+                f"narrating {self._session_label()}."
+            )
+        log.debug("ignoring hook event from session %s", session_id)
+        return False
+
+    def _session_label(self) -> str:
+        if self._bound_cwd:
+            return Path(self._bound_cwd).name or self._bound_cwd
+        return (self._bound_session or "")[:8] or "this session"
 
     # ---------------------------------------------------------------- hooks
 
     async def _on_tool(self, payload: dict) -> None:
+        # Recorded for every session: the tracker is bounded, and the Stop
+        # handler is where the session filter decides who gets narrated.
         self.tracker.record_tool(payload)
 
     async def _on_stop(self, payload: dict) -> None:
+        # Always finish the turn, even for a session we ignore, so its tool
+        # log is drained rather than left behind.
         event = self.tracker.finish_turn(payload)
+        if not self._follows(event.session_id, event.cwd):
+            return
         reply = await self.summarizer.summarize(event)
         await self._speak(reply)
         await self._auto_listen()
 
     async def _on_notification(self, payload: dict) -> None:
         note = self.tracker.notification(payload)
+        if not self._follows(note.session_id):
+            return
         if note.notification_type == "permission_prompt":
-            self._awaiting_permission = True
+            self._permission_session = note.session_id
             msg = note.message or "Claude needs your permission."
             await self._speak(f"{msg} Say 'go ahead' or 'no'.")
             await self._auto_listen()

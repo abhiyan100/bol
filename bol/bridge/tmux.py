@@ -1,7 +1,7 @@
 """tmux bridge: find the Claude Code pane, inject text, press Enter.
 
 Injection contract (empirically verified against Claude Code 2.1.x):
-  - Text goes in via load-buffer + paste-buffer, NEVER send-keys — send-keys
+  - Text goes in via load-buffer + paste-buffer, NEVER send-keys: send-keys
     submits on embedded newlines and mangles '#', '!', '$'.
   - Enter is a separate send-keys call after a short delay, otherwise the TUI
     can swallow it as part of the paste.
@@ -107,7 +107,7 @@ class TmuxBridge:
         panes = await self.discover()
         if not panes:
             raise TmuxError(
-                "no tmux pane running Claude Code found — start one with "
+                "no tmux pane running Claude Code found. Start one with "
                 "`bol launch` or run `claude` inside tmux"
             )
         if len(panes) > 1:

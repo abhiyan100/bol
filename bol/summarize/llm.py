@@ -1,6 +1,6 @@
 """Persona summarizer over the shared LLM engine (local model or user's API).
-Falls back to the deterministic template on any failure — the loop never goes
-silent because a model hiccuped."""
+Falls back to the deterministic template on any failure, so the loop never
+goes silent because a model hiccuped."""
 
 from __future__ import annotations
 

@@ -25,8 +25,10 @@ def build_transcriber(cfg: Config) -> Transcriber | None:
             return ParakeetTranscriber(cfg)
         except ImportError:
             log.error(
-                "parakeet-mlx not installed — run: uv sync --extra stt "
-                "(voice input disabled; text mode still works)"
+                "parakeet-mlx not installed; voice input disabled, text mode "
+                "still works. Reinstall with the stt extra: uv tool install "
+                "--force \"bol[stt,llm] @ git+https://github.com/abhiyan100/bol\" "
+                "(from a clone: uv sync --extra stt)"
             )
             return None
     raise ValueError(f"unknown stt engine: {cfg.stt.engine}")

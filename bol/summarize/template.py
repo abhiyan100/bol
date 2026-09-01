@@ -19,13 +19,25 @@ _CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
 _EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 _READ_TOOLS = {"Read", "Grep", "Glob", "LS"}
 
+# A markdown table or a log dump has no sentence punctuation, so the split
+# below returns the whole message as one "sentence". This is spoken aloud, so
+# cap it: 400 characters is about 25 seconds, already generous.
+SPOKEN_CHARS = 400
+
+
+def _cap(text: str, limit: int = SPOKEN_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:.")
+    return f"{cut or text[:limit]}, and more"
+
 
 def _spoken(text: str, max_sentences: int = 2) -> str:
     text = _CODE_BLOCK.sub(" code block ", text)
     text = _MARKDOWN_NOISE.sub("", text)
     text = re.sub(r"\s+", " ", text).strip()
     sentences = _SENTENCE_END.split(text)
-    return " ".join(sentences[:max_sentences]).strip()
+    return _cap(" ".join(sentences[:max_sentences]).strip())
 
 
 def describe_tools(tools: list[ToolUse]) -> str:
@@ -54,7 +66,7 @@ def describe_tools(tools: list[ToolUse]) -> str:
     line = ", ".join(parts)
     if failed:
         flag = f"{len(failed)} of those failed" if len(failed) > 1 else "one of those failed"
-        line = f"{line} — heads up, {flag}" if line else f"heads up, a tool call failed"
+        line = f"{line}, heads up, {flag}" if line else "heads up, a tool call failed"
     return line
 
 

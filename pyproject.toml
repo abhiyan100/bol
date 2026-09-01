@@ -1,12 +1,22 @@
 [project]
 name = "bol"
-version = "0.1.0"
+version = "0.2.0"
 description = "Speak. Bol runs Claude Code hands-free: dictate, command, and hear back what happened."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11,<3.13"
 authors = [{ name = "Abhiyan Poudel" }]
-keywords = ["claude-code", "voice", "dictation", "hands-free", "stt", "tts"]
+keywords = ["claude-code", "voice", "dictation", "hands-free", "stt", "tts", "mlx", "macos"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
 dependencies = [
     "aiohttp>=3.9",
     "numpy>=1.26",
@@ -33,6 +43,11 @@ kokoro = [
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
 all = ["bol[stt,llm,kokoro]"]
+
+[project.urls]
+Homepage = "https://bol-voice.vercel.app"
+Repository = "https://github.com/abhiyan100/bol"
+Issues = "https://github.com/abhiyan100/bol/issues"
 
 [tool.uv]
 # Bol is a macOS tool; keep Linux/CUDA wheels out of the lock.
