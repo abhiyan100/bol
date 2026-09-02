@@ -473,9 +473,8 @@ user_name = ""         # your name, spoken in replies
 
 [bridge]
 anywhere = true        # dictation lands wherever the cursor is: Notes, Slack, a browser
-                       # box. Bol presses Enter by itself only when the front window is
-                       # running Claude; saying "send it" presses it wherever you are.
-                       # false = terminals and IDEs only, for pastes and keys alike.
+                       # box, and "send it" presses Enter wherever you are. Bol never
+                       # presses Enter by itself. false = terminals and IDEs only.
 
 [server]
 port = 8770
