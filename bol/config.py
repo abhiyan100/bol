@@ -51,15 +51,15 @@ class SttConfig:
     # reaches Claude always comes from the full-buffer decode afterwards.
     live: bool = True
     # (left, right) attention context for the streaming decoder, in encoder
-    # frames of 80 ms. The right half is the finalization lag, so parakeet-mlx's
-    # documented default of (256, 256) holds every word back for 20 seconds.
-    # (256, 16) commits after 1.3 s; (256, 8) is faster and slightly less sure.
-    stream_context: list = field(default_factory=lambda: [256, 16])
-    # Audio handed to the streaming decoder per step. Smaller redraws the pill
-    # more often AND makes it wronger: parakeet-mlx spends the first encoder
-    # frame of every step on a window seam and commits that frame, so a short
-    # step commits a larger share of garbage. See bol/stt/parakeet.py. Floored
-    # at MIN_CHUNK_MS there; below ~320 ms the live text stops being readable.
+    # frames of 80 ms. The right half is how many frames a step refuses to
+    # finalize, and 256 of them is longer than a normal recording -- which is
+    # deliberate. A small right context makes each step commit the frames it
+    # just added, and those sit on parakeet-mlx's window seam, so the live
+    # words come out misspelt. See bol/stt/parakeet.py for the measurements.
+    stream_context: list = field(default_factory=lambda: [256, 256])
+    # Audio handed to the streaming decoder per step. Every step re-decodes the
+    # buffer, so this is the redraw rate and the CPU bill at once. Floored at
+    # MIN_CHUNK_MS in bol/stt/parakeet.py.
     stream_chunk_ms: int = 640
 
 
@@ -310,13 +310,11 @@ warm_s = 120           # hold the mic stream open this long after a recording, t
 [stt]
 engine = "parakeet"    # or "none" for text-only mode
 live = true            # show words in the pill while you talk (display only)
-# stream_context = [256, 16]  # (left, right) attention frames of 80 ms. The right
-#                             # half is how long a word waits before it is committed,
-#                             # so parakeet-mlx's own default of [256, 256] would
-#                             # hold your text back for 20 seconds. [256, 8] is faster.
-# stream_chunk_ms = 640       # audio per streaming decode. Smaller redraws more
-#                             # often and reads worse: each step commits one bad
-#                             # frame from parakeet-mlx's window seam. Floor 320.
+# stream_context = [256, 256] # (left, right) attention frames of 80 ms. A small
+#                             # right half makes the live words misspelt, not faster:
+#                             # it commits frames off parakeet-mlx's window seam.
+# stream_chunk_ms = 640       # audio per streaming decode; each one re-reads the
+#                             # buffer, so smaller redraws more often and costs more.
 
 [tts]
 engine = "say"         # or "kokoro" (pip install 'bol[kokoro]')

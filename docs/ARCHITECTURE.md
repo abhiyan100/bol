@@ -134,15 +134,25 @@ of silently never firing.
 
 **Live words are display only.** While a recording runs, the same blocks
 that fill the authoritative buffer are also tapped into parakeet-mlx's
-streaming decoder (`transcribe_stream`, context (256, 16): the documented
-default of (256, 256) holds text back for 20 s, since finalization lags by
-`context_size[1] * depth` frames of 80 ms). One call on the MLX thread owns
-the whole recording; partials go to the pill at 4 Hz, committed text solid
-and draft text dim. They never reach the bridge: the final text is always
-the full-buffer decode, then the grammar, then one paste. Measured on a
-7 s clip: first partial after about 2.5 s, 2.6 updates per second, peak RSS
-0.9 GB, and the streamed text missed the opening two seconds while the full
-decode was exact. That blind spot is a known open item.
+streaming decoder (`transcribe_stream`). One call on the MLX thread owns the
+whole recording; partials go to the pill at 4 Hz, settled words solid and
+the last 1.3 s dim. They never reach the bridge: the final text is always
+the full-buffer decode, then the grammar, then one paste.
+
+Why the streaming context is (256, 256) and not something shorter: with a
+short right context the decoder "finalizes" the frames it just added, and
+the leftmost of those frames is corrupted every step (parakeet-mlx runs its
+subsampling convolution without a cache, so the window's left edge sees
+zero padding, and the log-mel normalization is re-estimated per chunk).
+Measured: position 0 of each window is 59 percent off, positions 1 to 7 are
+bit-identical. Committing that frame garbled words permanently ("parser" to
+"Marcer"). With the full context nothing finalizes inside a normal
+utterance, the draft is a clean re-decode of everything so far, and the
+pill draws its solid and dim halves from token end times instead. First
+partial at about 0.8 s, exact text on 6 to 21 s clips, peak RSS 0.9 GB.
+Past 20 s the window slides and degrades to the short-context behavior
+rather than falling behind. Lead silence, bigger first chunks and deeper
+exact layers were all tried and changed nothing.
 
 **The pill is a separate process.** State on screen (listening, finalizing,
 thinking with the running tool, permission, speaking, error with its remedy)

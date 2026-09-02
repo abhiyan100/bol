@@ -185,13 +185,10 @@ def test_the_daemon_validates_at_startup():
 def test_live_words_are_on_with_a_context_that_actually_streams():
     cfg = Config()
     assert cfg.stt.live is True
-    # parakeet-mlx's own default right context of 256 frames is 20 seconds of
-    # held-back text. 16 frames commits a word after 1.3 s, which is a pill
-    # you can read while you talk.
-    assert cfg.stt.stream_context == [256, 16]
-    # And a step long enough to be worth committing: parakeet-mlx spends the
-    # first encoder frame of every step on its window seam, so 320 ms would
-    # commit one frame in four from garbage. See bol/stt/parakeet.py.
+    # A right context longer than the recording, so no step ever finalizes and
+    # the pill shows a re-decode instead of an accumulation of frames taken off
+    # parakeet-mlx's window seam. See bol/stt/parakeet.py for the measurements.
+    assert cfg.stt.stream_context == [256, 256]
     assert cfg.stt.stream_chunk_ms == 640
 
 
