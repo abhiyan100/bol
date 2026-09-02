@@ -3,7 +3,7 @@
 ## Design goals
 
 1. **The user keeps their normal Claude Code TUI.** Bol never wraps, replaces,
-   or screen-scrapes it: it pastes into the terminal the user is looking at (or a pinned tmux pane).
+   or screen-scrapes it: it pastes into the terminal the user is looking at.
 2. **Exact completion detection, no heuristics.** Claude Code's own hook
    system reports when a turn ends and what tools ran.
 3. **Local-first, zero recurring cost.** STT, TTS, and the default summarizer
@@ -11,38 +11,37 @@
 4. **Every capability is a protocol seam.** STT, TTS, summarizer, and the
    agent bridge are swappable: that's how a mobile companion, other agents
    (Codex, Cursor CLI), and better models land later without a rewrite.
+5. **One-way by default.** `talk_back = false` is the default mode: voice
+   in, no Speaker, no Summarizer, no LLM engine, no Kokoro. Hooks still feed
+   the pill (Thinking with the running tool, the permission question), and a
+   permission answer is a keystroke, not a spoken word. `bol run --talk-back`
+   or `talk_back = true` turns on two-way mode, the full spoken-summary loop
+   described below. Skipping the loop by default keeps Bol's footprint down
+   to the mic and the pill for people who just want hands-free dictation.
 
 ## The loop
 
 ```
         ┌──────────────────────────── user ───────────────────────────┐
-        │  holds hotkey / speaks after Bol's reply                    │
+        │  says type / holds the key                                  │
         ▼                                                             ▲
-  Recorder (sounddevice + energy VAD)                       Speaker (say | Kokoro)
+  Recorder (sounddevice + energy VAD)                Speaker (say | Kokoro, two-way only)
         │ float32 utterance                                           ▲ short reply
         ▼                                                             │
-  Transcriber (parakeet-mlx)                                Summarizer (LFM2.5 persona | template)
+  Transcriber (parakeet-mlx)                Summarizer (LFM2.5 persona | template, two-way only)
         │ final text                                                  ▲ StopEvent
         ▼                                                             │
-  grammar.parse_transcript ──► Bridge (focused|tmux) ─paste+Enter─► Claude ─► HookServer :8770
-   SEND / TYPE / DICTATE /       (title-gated)              Code       Stop / PostToolUse /
-   DISCARD / INTERRUPT / ...                                             Notification (async hooks)
+  grammar.parse_transcript ──────► Bridge (focused) ─paste+Enter─► Claude ─► HookServer :8770
+   SEND / TYPE / DICTATE /                                          Code       Stop / PostToolUse /
+   DISCARD / INTERRUPT / ...                                                    Notification (async hooks)
 ```
 
 ### Key decisions and their evidence
 
-**Injection is a swappable bridge.** Default `auto` picks between two
-backends at startup: `focused` (paste into the frontmost app via pasteboard
-swap + System Events Cmd+V, FluidVoice-style, guarded by a terminal-app
-allowlist so speech can't land in a chat app) and `tmux` (focus-independent
-injection into a pinned pane, used automatically when a Claude pane exists).
-Hooks make completion detection bridge-independent, which is what lets tmux
-be optional.
-
-**tmux injection, never `send-keys` for text.** `send-keys` submits early on
-embedded newlines and mangles `#`, `!`, `$`. Verified empirically: text goes
-in via `load-buffer` + `paste-buffer`, then Enter as a separate `send-keys`
-after a short delay (the TUI otherwise swallows it as part of the paste).
+**Injection is one bridge: focused.** Text pastes into the frontmost app via
+pasteboard swap + System Events Cmd+V, FluidVoice-style, with the clipboard
+restored after. tmux injection lived in v0.4 and earlier; typing anywhere
+made it redundant.
 
 **`pane_current_command` lies.** Claude Code retitles its process to its bare
 version string (`2.1.252`), so pane discovery confirms via `ps -t <pane_tty>`
@@ -85,35 +84,31 @@ instead. Both are deadline-bounded with a size-sanity check and the
 deterministic text as the unconditional fallback. Cleanup runs AFTER command
 parsing, so "send it" can never be cleaned away.
 
-**Focused-mode text goes anywhere; Enter is gated by who asked for it.**
-Pasting characters into the wrong window is a visible typo; pressing Enter
-there runs a command or sends a message. So the two are guarded separately.
-Under `[bridge] anywhere = true` (default) a paste lands wherever the cursor
-is, Notes and Slack included, and every Enter is labelled at the one place
-that knows: an explicit Enter came from the user's own words ("send it", the
-send trigger word, "go ahead" on a permission prompt) and is honoured
-wherever they are looking, because saying it *is* the intent; an automatic
-Enter is Bol's auto-send rule guessing that an utterance was a finished
-instruction, and a guess only gets to act where a wrong one is cheap. So
-automatic Enter keeps the old double gate: the app allowlist (bundle ids of
-known terminals and IDEs), which proves the front app can host a shell, AND
-evidence that Claude is in the active tab, because pasting speech plus Enter
-into a plain shell would execute it. For terminals: the window title contains
-the whole word "claude" and is not a `claude-<slug>` project name. For IDEs,
-whose titles name the file, not the terminal: a `claude` process must exist
-in the frontmost app's process tree. Unreadable title or process list fails
-closed. When the gate blocks, Bol still types the text, withholds Enter, and
-says why (`SubmitBlocked.reason`), which leaves exactly a pending paste for a
-later "send it". `anywhere = false` puts the allowlist back in front of every
-paste and keystroke, which is what Bol did before. Spoken discard follows the
-same explicit rule but not the same keystroke: Control-U kills the input line
-in a shell and means nothing in Notes, so outside a terminal or IDE it
-becomes one Cmd+Z, which undoes the paste and nothing else; an unreadable
-front app gets nothing at all. Paste itself re-checks the front app right
-before Cmd+V and restores the clipboard in a `finally`, skipping the restore
-when the clipboard held non-text content. The tmux bridge is untouched by all
-of this: it injects into a pinned Claude pane, so there is no app to be wrong
-about and it takes no such flag (`explicit_kw` in `bol/bridge/base.py`).
+**Text goes anywhere; Enter is explicit only.** Pasting characters into the
+wrong window is a visible typo; pressing Enter there runs a command or sends
+a message. So the two are guarded separately. Under `[bridge] anywhere =
+true` (default) a paste lands wherever the cursor is, Notes and Slack
+included, and Enter only ever comes from the user's own words: "send it",
+the send trigger word, or "go ahead" on a permission prompt. It fires
+wherever they are looking, because saying it *is* the intent. Nothing else
+ever produces an Enter, so the old double gate (the app allowlist, bundle
+ids of known terminals and IDEs, proving the front app can host a shell, AND
+evidence that Claude is in the active tab) is no longer load-bearing; it
+stays in the bridge as a backstop rather than being removed, since pasting
+speech plus Enter into a plain shell would execute it if it were ever
+reached. For terminals: the window title contains the whole word "claude"
+and is not a `claude-<slug>` project name. For IDEs, whose titles name the
+file, not the terminal: a `claude` process must exist in the frontmost app's
+process tree. Unreadable title or process list fails closed, which only
+matters if the backstop is ever re-armed. `anywhere = false` puts the
+allowlist back in front of every paste and keystroke, which is what Bol did
+before. Spoken "scratch that" follows the same explicit rule but not the
+same keystroke: Control-U kills the input line in a shell and means nothing
+in Notes, so outside a terminal or IDE it becomes one Cmd+Z, which undoes
+the paste and nothing else; an unreadable front app gets nothing at all.
+Paste itself re-checks the front app right before Cmd+V and restores the
+clipboard in a `finally`, skipping the restore when the clipboard held
+non-text content.
 
 **One narrated session at a time.** Hook payloads carry `session_id` and
 `cwd`, so the daemon binds to the first session it hears from and ignores
@@ -132,25 +127,20 @@ measured 9 to 24 ms; the chime used to be awaited before recording and cost
 window (default two minutes) rather than running forever: Bluetooth headsets
 drop to their low-quality route while any app holds the mic.
 
-**Tap or hold, one key.** Key-down always starts recording; the release
-decides the gesture (under 400 ms is a tap, FluidVoice's threshold). A tap
-keeps listening until the next tap or trailing silence; a hold ends on
-release. Every recording records how it ended, and `submit = "auto"` spends
-that: a dictation of three or more words is pasted and sent in one motion when
-the user ended it deliberately (released the key, tapped again), while one the
-silence gate ended is pasted and waits, because a pause is not an ending and
-users read the old behavior as "it sends while I am still thinking". Shorter
-text is pasted without Enter (Claude Code's own `/voice` rule), "type ..."
-never sends, a trailing "send it" always does, and `submit = "always"` is the
-old timing-blind rule.
-Hands-free reopen after Bol speaks is opt-in: with auto-send, an unasked mic
-could turn room noise into a prompt. Hands-free and tap-ended listening
-endpoint with Silero VAD (pysilero-vad, a 2.4 MB wheel with no
+**Hold to talk, say type to talk.** There are two ways to start: holding
+right Option begins recording and pastes on release, no Enter; saying "type"
+begins dictation that ends after a 3 s pause, which pastes it, also without
+Enter. Endpointing uses Silero VAD (pysilero-vad, a 2.4 MB wheel with no
 dependencies, about 1 ms per 32 ms block): speech starts after two blocks
 above 0.5, ends after `silence_ms` below 0.35. The old energy gate remains
-as the explicit and automatic fallback; it provably cannot hear speech that
-starts before it has measured any room tone, which is why it is no longer
-the default. The hotkey listener checks pynput's
+as the fallback; it provably cannot hear speech that starts before it has
+measured any room tone, which is why it is no longer the default. Nothing
+is ever sent by itself: pasting is the only thing either start does on its
+own, and Enter still needs a spoken send phrase, a wake keyword, or a
+permission answer, so a paste can sit and wait rather than firing on a
+guess about intent. The awake window, 60 s after any hold or trigger, is
+what replaced hands-free reopen: a follow-up inside that window needs
+neither the key nor "hey Bol" again. The hotkey listener checks pynput's
 `IS_TRUSTED` after start and raises a clear Input Monitoring error instead
 of silently never firing.
 
@@ -184,10 +174,10 @@ Apple Silicon, Porcupine's free tier ended in June 2026. sherpa-onnx keyword
 spotting (Apache-2.0, arm64 wheel, zipformer int8, open-vocabulary keywords
 as text) runs in `bol/wake/listener.py`, fed 32 ms frames over a pipe from
 the daemon's one microphone stream, so there is one mic owner and one
-indicator. A detection is treated exactly like a tap: the ring's pre-roll
+indicator. A detection is treated like a "type" start: the ring's pre-roll
 captures the words right after the phrase, the phrase is stripped before
-the grammar, endpointing and auto-send rules apply unchanged. Measured:
-2.5 percent of one core idle, detection at threshold 0.12 on two synthetic
+the grammar, and dictation is pasted once the pause ends, without Enter.
+Measured: 2.5 percent of one core idle, detection at threshold 0.12 on two synthetic
 voices with no false wakes on 30 s of speech. Muted while Bol speaks and
 for 500 ms after, and a 60 s awake window means follow-ups need no phrase.
 
@@ -221,10 +211,9 @@ STT provider protocol especially.
 
 | Module | Responsibility |
 |---|---|
-| `bol/daemon.py` | State machine: wires hotkey → record → transcribe → parse → act; hooks → summarize → speak → auto-listen |
-| `bol/bridge/base.py` | Bridge protocol + auto-selection |
+| `bol/daemon.py` | State machine: wires hotkey → record → transcribe → parse → act; ear → type; hooks → summarize → speak |
+| `bol/bridge/base.py` | Bridge protocol |
 | `bol/bridge/focused.py` | Frontmost-app paste injection with terminal allowlist |
-| `bol/bridge/tmux.py` | Pane discovery/pinning/verification, paste injection, key sends |
 | `bol/hud/` | On-screen pill: `Hud` client, AppKit child (`app.py`), pure render table |
 | `bol/wake/` | "hey Bol": sherpa-onnx keyword spotter child, model download, phrase stripping |
 | `bol/mlx_thread.py` | The one thread every in-process MLX model runs on |
@@ -240,7 +229,7 @@ STT provider protocol especially.
 | `bol/llm/` | OpenAI-compatible engine; supervised mlx_lm.server or user endpoint |
 | `bol/cleanup.py` | Deterministic transcript rules + api-mode LLM grammar pass |
 | `bol/config.py` | TOML config, env overrides |
-| `bol/cli.py` | `run`, `setup`, `talk`, `launch`, `hook`, `doctor`, `config` |
+| `bol/cli.py` | `run`, `setup`, `hook`, `doctor`, `config` |
 
 ## Testing
 
@@ -254,7 +243,7 @@ STT provider protocol especially.
 
 ## Mobile later
 
-The daemon is already the product; macOS specifics (hotkey, mic, tmux) live
+The daemon is already the product; macOS specifics (hotkey, mic) live
 at the edges. A phone client becomes another front end for the same loop:
 it ships audio in and receives summaries/audio out over an authenticated
 channel, while Claude and the models stay on the Mac.
