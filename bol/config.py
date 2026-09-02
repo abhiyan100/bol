@@ -71,9 +71,14 @@ class HotkeyConfig:
     key: str = "alt_r"  # pynput key name
     # auto mode: a press shorter than this is a tap, longer is a hold.
     tap_ms: int = 400
-    # auto: plain dictation is submitted for you, like pressing Enter.
+    # auto: plain dictation is submitted for you, like pressing Enter, but
+    #       only when you ended the recording on purpose: released the key,
+    #       or tapped a second time. Stop talking instead and the text is
+    #       pasted and waits, because a pause is not the same as "done".
+    # always: submit however the recording ended, pauses included (what auto
+    #       did before; hands-free users who liked that want this).
     # voice: nothing is submitted until you say "send it".
-    submit: str = "auto"  # auto | voice
+    submit: str = "auto"  # auto | always | voice
     # submit = "auto" only fires on this many words or more. A one-word
     # misfire ("yes") or a stray noise is pasted, never sent. Saying
     # "send it" still submits whatever it is riding on, however short.
@@ -81,7 +86,7 @@ class HotkeyConfig:
 
 
 HOTKEY_MODES = ("auto", "push_to_talk", "toggle")
-SUBMIT_MODES = ("auto", "voice")
+SUBMIT_MODES = ("auto", "always", "voice")
 VAD_MODES = ("silero", "energy")
 
 
@@ -225,9 +230,10 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     ui: UiConfig = field(default_factory=UiConfig)
     # After Bol speaks a reply, automatically open the mic for the next
-    # instruction. Off by default: with [hotkey] submit = "auto" a mic that
-    # reopens unasked can send whatever the room said next, and a tap is
-    # instant anyway.
+    # instruction. Off by default: a mic that reopens unasked hears whatever
+    # the room said next, and a tap is instant anyway. Every hands-free turn
+    # ends on silence, so under submit = "auto" it is pasted and waits for
+    # "send it"; submit = "always" is the old flow where a pause sent it.
     hands_free: bool = False
 
     @property
@@ -328,9 +334,11 @@ def validate_wake(wake: WakeConfig) -> None:
 DEFAULT_CONFIG_TOML = """\
 # Bol configuration. Every key is optional; these are the defaults.
 
-# reopen the mic automatically after Bol speaks. Off by default: with
-# submit = "auto" below, a mic that reopens unasked can send whatever the room
-# said next, and tapping the hotkey is instant anyway.
+# reopen the mic automatically after Bol speaks. Off by default: a mic that
+# reopens unasked hears whatever the room said next, and tapping the hotkey is
+# instant anyway. A hands-free turn ends when you stop talking, so under
+# submit = "auto" it is pasted and waits for "send it"; set submit = "always"
+# below for the old flow where a pause sent it.
 hands_free = false
 
 [ui]
@@ -342,7 +350,10 @@ position = "top"       # which edge the pill sits on: "top" | "bottom"
 mode = "auto"          # tap or hold, whichever you did | "push_to_talk" | "toggle"
 key = "alt_r"          # right Option
 tap_ms = 400           # a press shorter than this counts as a tap, not a hold
-submit = "auto"        # auto: dictation submits itself | "voice": only "send it" submits
+submit = "auto"        # auto: dictation submits itself when you tap again or release the
+                       # key; stop talking instead and it is pasted, waiting for "send it"
+                       # or your next tap. "always": submit however you stopped, pauses
+                       # included. "voice": nothing submits until you say "send it".
 auto_send_min_words = 3  # shorter than this is pasted, not sent; "send it" still submits
 
 [wake]

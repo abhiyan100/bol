@@ -114,11 +114,21 @@ class Hud:
 
     # ------------------------------------------------------------------ send
 
-    def set(self, state: str, text: str = "", detail: str = "") -> None:
-        """Put one line on the pill. Never raises, never blocks."""
+    def set(self, state: str, text: str = "", detail: str = "", hold: float = 0.0) -> None:
+        """Put one line on the pill. Never raises, never blocks.
+
+        hold overrides how long a transient state stays up, for this line
+        only: a sentence the user is meant to read needs longer than the one
+        word the state table sizes its default for.
+        """
         if not self.enabled or self._stopped or state not in STATES:
             return
-        line = json.dumps({"state": state, "text": text, "detail": detail}) + "\n"
+        payload = {"state": state, "text": text, "detail": detail}
+        if hold:
+            # Sent only when there is something to override, so the ordinary
+            # line down the pipe stays exactly what it always was.
+            payload["hold"] = float(hold)
+        line = json.dumps(payload) + "\n"
         if not self._write(line):
             self._respawn(line)
 

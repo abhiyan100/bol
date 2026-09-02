@@ -42,7 +42,9 @@ COLORS = {
 }
 
 # Transient states take themselves off the screen after this long, so the
-# daemon never has to hold a timer open just to retract a word.
+# daemon never has to hold a timer open just to retract a word. A caller can
+# override its own line (see Update.hold): "Sent" is one word and one second,
+# and a sentence the user has to read is neither.
 HOLD_S = {"sending": 1.0, "error": 3.0}
 
 # Used when the caller sends a state with no text of its own.
@@ -64,6 +66,10 @@ TRUNCATION = "..."
 # Hard ceiling on the label. The panel narrows it again to whatever 60% of
 # the active screen can actually hold.
 MAX_CHARS = 120
+# Ceiling on a per-line hold. A transient line that outstays this is a pill
+# stuck on a stale sentence, which is the failure the whole state table
+# exists to avoid.
+MAX_HOLD_S = 30.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,9 @@ class Update:
     state: str
     text: str = ""
     detail: str = ""
+    # Seconds this line stays up, overriding HOLD_S for this line only.
+    # 0 means "whatever the state says".
+    hold: float = 0.0
 
 
 def _clean(value: object) -> str:
@@ -103,7 +112,21 @@ def parse_line(line: str) -> Update | None:
         state=data["state"],
         text=_clean(data.get("text")),
         detail=_clean(data.get("detail")),
+        hold=_hold(data.get("hold")),
     )
+
+
+def _hold(value: object) -> float:
+    """A per-line hold from the pipe, or 0 for anything unusable.
+
+    Same rule as every other field the child reads: a nonsense value costs
+    the override, never the line.
+    """
+    try:
+        seconds = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return seconds if 0.0 < seconds < MAX_HOLD_S else 0.0
 
 
 def truncate_middle(text: str, limit: int) -> str:
@@ -163,8 +186,15 @@ def color_for(state: str) -> str:
     return COLORS.get(state, "")
 
 
-def hold_for(state: str) -> float:
-    """Seconds this state stays up on its own. 0 means until told otherwise."""
+def hold_for(state: str, hold: float = 0.0) -> float:
+    """Seconds this line stays up on its own. 0 means until told otherwise.
+
+    A caller's own hold wins when it has one: the state table sizes the
+    default word for each state, and a line with more to say than "Sent"
+    needs longer than "Sent" does.
+    """
+    if hold and hold > 0:
+        return float(hold)
     return HOLD_S.get(state, 0.0)
 
 

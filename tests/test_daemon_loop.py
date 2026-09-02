@@ -18,9 +18,12 @@ from bol.daemon import Daemon
 class FakeRecorder:
     """Scripted recorder: returns queued 'audio' markers, no hardware."""
 
-    def __init__(self, utterance_count):
+    def __init__(self, utterance_count, end_reason=""):
         self.remaining = utterance_count
         self.calls = []
+        # How every recording this fake makes ends. Empty by default so the
+        # tests that predate the rule keep asking only what they meant to.
+        self.end_reason = end_reason
 
     def begin(self):
         return RecordingSession()
@@ -30,6 +33,8 @@ class FakeRecorder:
         if session.stopped or self.remaining == 0:
             return None
         self.remaining -= 1
+        if self.end_reason:
+            session.note_end(self.end_reason)
         return np.zeros(16000, dtype=np.float32)
 
 
@@ -80,6 +85,9 @@ class FakeHud:
 
     def __init__(self, order=None):
         self.calls = []
+        # Per-line hold overrides, parallel to calls: the hint after a paste
+        # has to outstay "Sent", and that is the only evidence it does.
+        self.holds = []
         self.order = order
 
     async def start(self):
@@ -88,8 +96,9 @@ class FakeHud:
     async def stop(self):
         pass
 
-    def set(self, state, text="", detail=""):
+    def set(self, state, text="", detail="", hold=0.0):
         self.calls.append((state, text, detail))
+        self.holds.append(hold)
         if self.order is not None:
             self.order.append(f"pill:{state}")
 
@@ -1051,3 +1060,184 @@ async def test_a_microphone_that_opens_says_nothing():
 
     assert d.recorder.opens == 1
     assert d.hud.calls == []
+
+
+# ------------------------------------------------- how the recording ended
+
+# The user feedback that started this: in tap mode "it immediately sends".
+# A recording the silence gate ended is a pause, and people pause
+# mid-sentence; a release or a second tap is someone saying "done".
+
+
+@pytest.mark.asyncio
+async def test_a_pause_pastes_instead_of_sending():
+    d = _daemon(1, ["add a login test"], submit="auto")
+
+    reopen = await d._handle_utterance("add a login test", "silence")
+
+    # The words are in the box, unsent, and the loop stays with Bol.
+    assert d.bridge.injected == [("add a login test ", False)]
+    assert reopen is True
+
+
+@pytest.mark.asyncio
+async def test_a_release_sends():
+    d = _daemon(1, ["add a login test"], submit="auto")
+
+    reopen = await d._handle_utterance("add a login test", "release")
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert reopen is False
+
+
+@pytest.mark.asyncio
+async def test_a_second_tap_sends():
+    d = _daemon(1, ["add a login test"], submit="auto")
+
+    reopen = await d._handle_utterance("add a login test", "tap")
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert reopen is False
+
+
+@pytest.mark.asyncio
+async def test_always_sends_on_a_pause_too():
+    # The pre-0.5 rule, kept for anyone whose flow relied on it.
+    d = _daemon(1, ["add a login test"], submit="always")
+
+    reopen = await d._handle_utterance("add a login test", "silence")
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert reopen is False
+
+
+@pytest.mark.asyncio
+async def test_always_still_respects_the_word_floor():
+    d = _daemon(1, ["run tests"], submit="always")
+
+    await d._handle_utterance("run tests", "release")
+
+    assert d.bridge.injected == [("run tests ", False)]
+
+
+@pytest.mark.asyncio
+async def test_voice_never_sends_however_the_recording_ended():
+    for reason in ("release", "tap", "silence", "max"):
+        d = _daemon(1, ["add a login test"], submit="voice")
+        await d._handle_utterance("add a login test", reason)
+        assert d.bridge.injected == [("add a login test ", False)], reason
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_recording_is_not_a_finished_sentence():
+    # max_utterance_s ran out mid-sentence. Whatever that is, it is not the
+    # user saying they were done.
+    d = _daemon(1, ["add a login test"], submit="auto")
+
+    await d._handle_utterance("add a login test", "max")
+
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+@pytest.mark.asyncio
+async def test_send_it_submits_after_a_pause_whatever_ended_it():
+    d = _daemon(1, ["go send it"], submit="auto")
+
+    await d._handle_utterance("go send it", "silence")
+
+    # An explicit "send it" is an ending in itself.
+    assert d.bridge.injected == [("go", True)]
+
+
+@pytest.mark.asyncio
+async def test_the_pill_says_how_to_send_after_a_pause():
+    d = _daemon(1, ["add a login test"], submit="auto")
+
+    await d._handle_utterance("add a login test", "silence")
+
+    assert d.hud.calls[-1] == ("sending", daemon_mod.PASTE_HINT, "")
+    # Longer than "Sent": this one is a sentence to read, not a receipt.
+    assert d.hud.holds[-1] == daemon_mod.PASTE_HINT_S
+    assert daemon_mod.PASTE_HINT_S == 2.5
+    assert "send it" in daemon_mod.PASTE_HINT
+    assert "tap" in daemon_mod.PASTE_HINT
+
+
+@pytest.mark.asyncio
+async def test_the_hint_is_what_the_pill_would_show():
+    # The pill renders "sending" from the caller's own text, not the "Sent"
+    # default, or the hint would never reach the screen.
+    from bol.hud.render import hold_for, label_for
+
+    assert label_for("sending", daemon_mod.PASTE_HINT) == daemon_mod.PASTE_HINT
+    assert hold_for("sending", daemon_mod.PASTE_HINT_S) == 2.5
+    assert hold_for("sending") == 1.0  # every other "Sent" is unchanged
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_paste_shows_no_hint():
+    # Under the word floor, so it was never going to send: nothing to explain.
+    d = _daemon(1, ["run tests"], submit="auto")
+
+    await d._handle_utterance("run tests", "release")
+
+    assert d.hud.states[-1] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_no_hint_when_auto_send_is_off():
+    d = _daemon(1, ["add a login test"], submit="voice")
+
+    await d._handle_utterance("add a login test", "silence")
+
+    assert d.hud.states[-1] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_a_pause_then_send_it_presses_enter():
+    # The whole point of pasting instead of sending: the prompt waits, and
+    # one phrase submits it.
+    d = _daemon(2, ["add a login test", "send it"], submit="auto")
+
+    await d._handle_utterance("add a login test", "silence")
+    reopen = await d._handle_utterance("send it", "silence")
+
+    assert d.bridge.injected == [("add a login test ", False), ("", True)]
+    assert reopen is False
+
+
+@pytest.mark.asyncio
+async def test_the_ending_travels_from_the_recording_to_the_rule():
+    # End to end, through the session token: a hands-free turn ends on
+    # silence, so it is pasted, and the next thing said sends it.
+    d = _daemon(2, ["add a login test", "send it"], submit="auto")
+    d.recorder = FakeRecorder(2, end_reason="silence")
+
+    await d._listen_session(d.recorder.begin(), until_silence=True)
+
+    assert d.recorder.calls == [True, True]
+    assert d.bridge.injected == [("add a login test ", False), ("", True)]
+
+
+@pytest.mark.asyncio
+async def test_hands_free_users_can_have_the_old_flow_back():
+    # submit = "always" is the documented way to keep a pause sending.
+    d = _daemon(2, ["add a login test", "unheard"], submit="always")
+    d.recorder = FakeRecorder(2, end_reason="silence")
+
+    await d._listen_session(d.recorder.begin(), until_silence=True)
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert d.recorder.calls == [True]  # sent, so the turn left Bol
+
+
+@pytest.mark.asyncio
+async def test_a_typed_line_still_submits_itself():
+    # Text mode has no recording to end. A whole typed line is as deliberate
+    # as the Return key it arrived on.
+    d = _daemon(1, ["add a login test"], submit="auto")
+
+    reopen = await d._handle_utterance("add a login test")
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert reopen is False

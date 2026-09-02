@@ -94,9 +94,13 @@ Good tools; they stop at the input box.
 bol run
 ```
 
-Open Claude Code in any terminal. **Tap right Option** and talk; tap again
-or just stop talking, and the text lands in the window you are looking at
-and is sent. **Hold** it instead for push-to-talk: release to send. The mic
+Open Claude Code in any terminal. **Tap right Option** and talk. **Tap again**
+when you are done, or **hold and release** for push-to-talk, and the text
+lands in the window you are looking at and is sent. If you just stop talking,
+Bol cannot tell a pause from an ending, so the text is pasted and waits: say
+**"send it"**, or tap again and keep going. (`submit = "always"` sends on a
+pause too, `submit = "voice"` only ever sends on "send it": see Configure.)
+The mic
 is live on the keystroke, with 300 ms of pre-roll, so the first word is never
 lost. Anything under three words is pasted without Enter, so a stray "yes"
 never reaches Claude unread. A small pill at the top of the screen shows
@@ -107,7 +111,7 @@ never touch the terminal: only the final, full-accuracy decode is pasted. Voice 
 
 | You say | Bol does |
 |---|---|
-| "...fix the login bug" (3+ words) | pastes the prompt, presses Enter |
+| "...fix the login bug" (3+ words) | pastes the prompt, and presses Enter if you tapped again or released |
 | "...fix the login bug **send it**" | same, in any mode and at any length |
 | "**type** hello world" | inserts text, no Enter |
 | "**send**" / "**go ahead**" | presses Enter (also answers permission prompts) |
@@ -127,8 +131,11 @@ interrupt = ["whoa whoa"]
 
 When Claude finishes, Bol speaks a summary. Tap to answer. Set
 `hands_free = true` and Bol reopens the mic by itself after speaking, so the
-whole session is a conversation with no keys at all. When Claude asks for
-permission, Bol reads the request and waits for "go ahead" or "no".
+whole session is a conversation with no keys at all. A hands-free turn ends
+when you stop talking, so under `submit = "auto"` it is pasted and waits for
+"send it"; set `submit = "always"` if you want a pause to send it, the way it
+used to. When Claude asks for permission, Bol reads the request and waits for
+"go ahead" or "no".
 
 Running several Claude Code sessions? Bol narrates the first one it hears
 from and tells you when it ignores another. Set `[server] follow = "all"` to
@@ -157,7 +164,9 @@ key = "alt_r"                # right Option. On layouts where that is AltGr,
                              # use "cmd_r" or "f13".
 mode = "auto"                # tap to talk, hold for push-to-talk;
                              # or "push_to_talk", "toggle"
-submit = "auto"              # send when you stop; "voice" = only on "send it"
+submit = "auto"              # send when you tap again or release; a pause pastes
+                             # and waits. "always" = send however you stopped,
+                             # "voice" = only on "send it"
 auto_send_min_words = 3      # shorter text is pasted, not sent
 
 [audio]

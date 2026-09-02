@@ -686,3 +686,107 @@ async def test_a_monitor_that_raises_never_costs_the_recording(monkeypatch):
     assert audio is not None
     assert audio.size >= 6 * BLOCK
     assert opened[0].starts == 1
+
+
+# ----------------------------------------------------------- how it ended
+
+# end_reason is the difference between "I am done" and "I paused", and the
+# daemon spends it on whether to press Enter. Every path that ends a
+# recording has to name itself, or a pause reads as a finished sentence.
+
+
+async def test_a_release_names_its_ending(monkeypatch):
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(6), on_exhausted=lambda: session.request_stop("release"))
+
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    assert session.end_reason == "release"
+
+
+async def test_a_second_tap_names_its_ending(monkeypatch):
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(6), on_exhausted=lambda: session.request_stop("tap"))
+
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    assert session.end_reason == "tap"
+
+
+async def test_an_unnamed_stop_is_just_stop(monkeypatch):
+    # Barge-in and shutdown call request_stop() with nothing to say. That is
+    # not the user finishing a sentence, so it must not read as one.
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(6), on_exhausted=session.request_stop)
+
+    await _record(recorder, session, until_silence=False)
+
+    assert session.end_reason == "stop"
+
+
+async def test_the_gate_names_a_silence_ending(monkeypatch):
+    # Two blocks of speech, then three under the release threshold: the
+    # endpoint the user did not ask for.
+    gate = ScriptedGate([0.1, 0.99, 0.99], tail=0.05)
+    recorder = Recorder(_cfg(), gate=gate)
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _silence(40))
+
+    audio = await _record(recorder, session, until_silence=True)
+
+    assert audio is not None
+    assert session.end_reason == "silence"
+
+
+async def test_the_listen_window_names_its_ending(monkeypatch):
+    # Nobody spoke inside listen_window_s, so the mic was given up. No audio,
+    # and an ending that was never the user's.
+    gate = ScriptedGate(tail=0.05)
+    recorder = Recorder(_cfg(), gate=gate)
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _silence(60))
+
+    assert await _record(recorder, session, until_silence=True) is None
+    assert session.end_reason == "window"
+
+
+async def test_the_utterance_cap_names_its_ending(monkeypatch):
+    # max_utterance_s ran out mid-sentence, which is the one ending that is
+    # certainly not the end of what someone was saying.
+    recorder = Recorder(_cfg(max_utterance_s=1))
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(60))
+
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    assert session.end_reason == "max"
+
+
+async def test_a_fresh_session_has_not_ended():
+    assert Recorder(_cfg()).begin().end_reason == ""
+
+
+async def test_the_first_answer_wins():
+    # A hold released in the same breath as the gate endpointing. Whatever
+    # actually ended the recording got there first; the loser must not
+    # relabel a pause as a deliberate finish.
+    session = Recorder(_cfg()).begin()
+    session.note_end("silence")
+    session.request_stop("release")
+
+    assert session.end_reason == "silence"
+    assert session.stopped is True
+
+
+async def test_every_reason_is_documented():
+    # The daemon reads these names; a new one nobody wrote down is a rule
+    # nobody applied.
+    assert set(capture.END_REASONS) == {
+        "release", "tap", "silence", "window", "max", "stop",
+    }

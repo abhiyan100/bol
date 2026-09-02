@@ -118,9 +118,14 @@ drop to their low-quality route while any app holds the mic.
 **Tap or hold, one key.** Key-down always starts recording; the release
 decides the gesture (under 400 ms is a tap, FluidVoice's threshold). A tap
 keeps listening until the next tap or trailing silence; a hold ends on
-release. In `submit = "auto"` a dictation of three or more words is pasted and
-sent in one motion, shorter text is pasted without Enter (Claude Code's own
-`/voice` rule), "type ..." never sends, and a trailing "send it" always does.
+release. Every recording records how it ended, and `submit = "auto"` spends
+that: a dictation of three or more words is pasted and sent in one motion when
+the user ended it deliberately (released the key, tapped again), while one the
+silence gate ended is pasted and waits, because a pause is not an ending and
+users read the old behavior as "it sends while I am still thinking". Shorter
+text is pasted without Enter (Claude Code's own `/voice` rule), "type ..."
+never sends, a trailing "send it" always does, and `submit = "always"` is the
+old timing-blind rule.
 Hands-free reopen after Bol speaks is opt-in: with auto-send, an unasked mic
 could turn room noise into a prompt. Hands-free and tap-ended listening
 endpoint with Silero VAD (pysilero-vad, a 2.4 MB wheel with no

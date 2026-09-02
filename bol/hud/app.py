@@ -143,7 +143,7 @@ class Pill:
             self.hide()
             return
         self.show(label, color, update.detail if update.state == "listening" else "")
-        hold = hold_for(update.state)
+        hold = hold_for(update.state, update.hold)
         if hold:
             self._timer = self.AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                 hold, False, lambda _timer: self.hide()

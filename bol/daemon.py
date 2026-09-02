@@ -6,10 +6,14 @@ hotkey/auto-listen → record → transcribe → parse command → tmux inject
 
 Dictated text is injected into Claude's input box immediately, so the user
 watches it appear in the TUI exactly like typing. With [hotkey] submit =
-"auto" a dictated instruction of a few words or more presses Enter for itself;
-shorter text, a "type ..." prefix, and submit = "voice" all paste without it,
-and "send it" always submits. The Stop hook closes the loop by speaking what
-happened.
+"auto" a dictated instruction of a few words or more presses Enter for itself,
+but only when the user ended the recording on purpose: a release or a second
+tap is someone saying "done", while the silence gate ending an utterance only
+means they stopped for a moment, and people stop mid-sentence. That paste
+waits for "send it" or the next tap. Shorter text, a "type ..." prefix, and
+submit = "voice" all paste without Enter, submit = "always" sends however the
+recording ended, and "send it" always submits. The Stop hook closes the loop
+by speaking what happened.
 
 With [wake] enabled = true, "hey Bol" starts a recording without the key, and
 for awake_s afterwards the next thing said needs no phrase at all. See
@@ -73,6 +77,19 @@ CHAIN, QUIET, STOP = "chain", "quiet", "stop"
 # second a line of text reads as flicker, and every redraw is a write down a
 # pipe to another process.
 LIVE_PILL_HZ = 4.0
+
+# Endings that mean the user said "done", so submit = "auto" may press Enter:
+# they let the key go, or tapped a second time. Everything else is Bol's own
+# decision that the utterance was over, and the commonest of those is a pause.
+# "" is nobody saying, which is text mode typing a whole line: as deliberate
+# as the Return key it arrived on.
+DELIBERATE_ENDS = ("release", "tap", "")
+
+# What the pill says after a paste that auto-send held back, and how long it
+# stays. Long enough to read a sentence, short enough that it is gone before
+# the next thing said.
+PASTE_HINT = "Pasted. Say send it, or tap and keep talking"
+PASTE_HINT_S = 2.5
 
 
 class _LiveWords:
@@ -414,8 +431,10 @@ class Daemon:
             self._tap_released()
             return
         # Stops only its own session, inert if that press never got the mic.
+        # A release is the user saying they are finished, which is what lets
+        # submit = "auto" press Enter on what they said.
         if self._ptt_session is not None:
-            self._ptt_session.request_stop()
+            self._ptt_session.request_stop("release")
             self._ptt_session = None
         self._tap_session = None
         self._clear_tap()
@@ -423,7 +442,8 @@ class Daemon:
     def _tap_released(self) -> None:
         if self._tap_session is not None:
             # Second tap: the user is done early, before the silence gate.
-            self._tap_session.request_stop()
+            # Deliberate, the same way a release is.
+            self._tap_session.request_stop("tap")
             self._tap_session = None
             self._ptt_session = None
             self._clear_tap()
@@ -590,7 +610,10 @@ class Daemon:
             # the awake window is measured from the last thing said, not from
             # the wake that opened it.
             self._touch_awake()
-            return CHAIN if await self._handle_utterance(text) else STOP
+            # How the recording ended travels with the words: it is the only
+            # evidence of whether the user had finished saying them.
+            handled = await self._handle_utterance(text, session.end_reason)
+            return CHAIN if handled else STOP
         finally:
             self._active_session = None
             # This recording is over however it ended, so no stale tap state
@@ -628,10 +651,15 @@ class Daemon:
     _YES = {"yes", "yeah", "yep", "approve", "go ahead", "do it"}
     _NO = {"no", "nope", "deny", "don't", "dont"}
 
-    async def _handle_utterance(self, text: str) -> bool:
+    async def _handle_utterance(self, text: str, end_reason: str = "") -> bool:
         """Act on one utterance. Returns True if the mic should reopen
         immediately (hands-free chaining), False if the turn passed to Claude
-        or the loop should go quiet."""
+        or the loop should go quiet.
+
+        end_reason is how the recording that produced this text ended (see
+        bol/audio/capture.py). Empty means nobody said: text mode types whole
+        lines, and a typed line is already deliberate.
+        """
         try:
             if self._permission_session is not None:
                 norm = text.strip().lower().rstrip(".!,")
@@ -639,7 +667,7 @@ class Daemon:
                     return await self._answer_permission(approve=True)
                 if norm in self._NO:
                     return await self._answer_permission(approve=False)
-            return await self._apply(self.grammar.parse(text))
+            return await self._apply(self.grammar.parse(text), end_reason)
         except SubmitBlocked as exc:
             # The text WAS typed; only the Enter was withheld.
             log.info("submit withheld: %s", exc)
@@ -675,19 +703,38 @@ class Daemon:
         print("bol: denied.")
         return True
 
-    def _auto_sends(self, text: str) -> bool:
+    def _auto_sends(self, text: str, end_reason: str = "") -> bool:
         """Whether plain dictation should press Enter for the user.
 
-        The word floor is the guard: a stray noise or a one-word misfire gets
-        pasted and can be deleted, where sending it would have cost a whole
-        Claude turn. Anything ending in "send it" never reaches here, it is
-        already Action.SEND.
+        Two guards, and they answer different mistakes. The word floor is
+        about content: a stray noise or a one-word misfire gets pasted and can
+        be deleted, where sending it would have cost a whole Claude turn. The
+        ending is about timing: "auto" sends only what the user finished on
+        purpose, because a recording the silence gate ended is a pause, and
+        the first thing people said about tap mode was that it sent while they
+        were still thinking. submit = "always" keeps the old, timing-blind
+        rule. Anything ending in "send it" never reaches here, it is already
+        Action.SEND.
         """
-        if self.cfg.hotkey.submit != "auto" or not text:
+        submit = self.cfg.hotkey.submit
+        if submit not in ("auto", "always") or not text:
             return False
-        return len(text.split()) >= self.cfg.hotkey.auto_send_min_words
+        if len(text.split()) < self.cfg.hotkey.auto_send_min_words:
+            return False
+        return submit == "always" or end_reason in DELIBERATE_ENDS
 
-    async def _apply(self, parsed) -> bool:
+    def _pasted_on_silence(self, text: str, end_reason: str) -> bool:
+        """Whether this paste is an auto-send held back only by a pause.
+
+        Exactly the case worth a line on the pill: the words cleared every
+        other bar, so one phrase or one tap sends them, and saying so is what
+        keeps "it did not send" from reading as "it did not work".
+        """
+        if self.cfg.hotkey.submit != "auto" or end_reason != "silence":
+            return False
+        return self._auto_sends(text, "tap")
+
+    async def _apply(self, parsed, end_reason: str = "") -> bool:
         action, text = parsed.action, parsed.text
         mode = self.cfg.cleanup.mode
         wants_clean = (parsed.clean and mode != "off") or (
@@ -705,11 +752,13 @@ class Daemon:
             if cleaned != text:
                 print(f"bol: cleaned -> {cleaned}")
                 text = cleaned
-        if action is Action.DICTATE and self._auto_sends(text):
-            # Plain speech is a whole instruction, so send it. A "type ..."
-            # prefix (Action.TYPE) still pastes without Enter, and a trailing
-            # "send it" is still stripped and honoured; only the silent
-            # "say the magic words or nothing happens" default goes away.
+        held_back = action is Action.DICTATE and self._pasted_on_silence(text, end_reason)
+        if action is Action.DICTATE and self._auto_sends(text, end_reason):
+            # Plain speech is a whole instruction the user finished on
+            # purpose, so send it. A "type ..." prefix (Action.TYPE) still
+            # pastes without Enter, and a trailing "send it" is still stripped
+            # and honoured; only the silent "say the magic words or nothing
+            # happens" default goes away.
             action = Action.SEND
         if action in (Action.DICTATE, Action.TYPE):
             # A bare "clean it up" parses as DICTATE with no text; injecting
@@ -719,6 +768,13 @@ class Daemon:
             await self.bridge.inject(
                 text + " " if action is Action.DICTATE else text, submit=False
             )
+            if held_back:
+                # This one would have been sent if the user had said so, so
+                # the pill says how to say so rather than going quiet and
+                # leaving a finished prompt sitting there unexplained.
+                self.hud.set("sending", PASTE_HINT, hold=PASTE_HINT_S)
+                print("bol: pasted. Say send it or tap to continue.")
+                return True
             # The words are in Claude's box where the user can see them, so
             # the pill has nothing left to say.
             self._idle_pill()

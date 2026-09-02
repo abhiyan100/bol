@@ -8,7 +8,10 @@ mints a token synchronously at the triggering event, and request_stop() on a
 token only ever ends *that* recording. A release for a session that never got
 the mic, or that already finished, is inert by construction: no cross-talk,
 no lost-stop races. The token also carries the mutable until_silence flag, so
-a tap can switch a running push-to-talk recording over to the speech gate.
+a tap can switch a running push-to-talk recording over to the speech gate,
+and end_reason, which records how the recording actually ended. That is the
+difference between "I am done" and "I paused", and the daemon spends it on
+whether to press Enter.
 
 The stream is prepared once and kept. Building an sd.InputStream costs about
 33 ms on an M-series Mac and start() another 10 to 25 ms, and both used to sit
@@ -57,6 +60,16 @@ log = logging.getLogger("bol.audio")
 # How much recent audio the always-on ring keeps. Caps pre_roll_ms and keeps
 # the buffer's memory flat no matter how long the stream stays warm.
 _RING_MS = 2000
+
+# Every way a recording can end, as RecordingSession.end_reason.
+#   release: the held key came up.
+#   tap:     a second tap ended a recording the first tap started.
+#   silence: the speech gate endpointed after trailing silence.
+#   window:  listen_window_s passed with nobody speaking.
+#   max:     max_utterance_s (or its wall-clock backstop) ran out.
+#   stop:    someone else stopped it: barge-in, shutdown, an unnamed caller.
+# The first two are the user saying "done"; the rest are Bol deciding.
+END_REASONS = ("release", "tap", "silence", "window", "max", "stop")
 
 
 def _resolve_input_device(spec: str) -> int | None:
@@ -111,16 +124,34 @@ class RecordingSession:
     tap is optional and set before record(): a queue.Queue (thread-safe, since
     the audio callback fills it from PortAudio's thread) or any callable that
     takes one block. It sees every block this recording captures.
+
+    end_reason is how the recording finished, and the daemon reads it to
+    decide whether the words were finished too. Letting the key go or tapping
+    a second time is someone saying "done"; the silence gate ending an
+    utterance only means they paused, and people pause mid-sentence.
     """
 
-    __slots__ = ("_stop", "until_silence", "tap")
+    __slots__ = ("_stop", "until_silence", "tap", "end_reason")
 
     def __init__(self, until_silence: bool = False) -> None:
         self._stop = asyncio.Event()
         self.until_silence = until_silence
         self.tap = None
+        # One of END_REASONS once this recording is over; "" until then.
+        self.end_reason = ""
 
-    def request_stop(self) -> None:
+    def note_end(self, reason: str) -> None:
+        """Name what ended this recording; the first answer wins.
+
+        A hold released in the same breath as the gate endpointing must not
+        relabel a pause as a deliberate finish, or the other way round:
+        whatever actually ended the recording got there first.
+        """
+        if not self.end_reason:
+            self.end_reason = reason
+
+    def request_stop(self, reason: str = "stop") -> None:
+        self.note_end(reason)
         self._stop.set()
 
     @property
@@ -446,6 +477,7 @@ class Recorder:
                 else:
                     silence_blocks += 1
                     if session.until_silence and silence_blocks >= silence_limit:
+                        session.note_end("silence")
                         break
             elif prob > START_PROB:
                 speech_blocks += 1
@@ -454,7 +486,13 @@ class Recorder:
             else:
                 onset_blocks = 0  # a lone loud block is a noise, not a word
                 if session.until_silence and len(blocks) >= window_blocks:
+                    session.note_end("window")
                     break  # nobody spoke, give the mic up
+        else:
+            # The while condition gave out rather than a break: the block cap
+            # or its wall-clock backstop. Either way the recording ran out of
+            # room, which is not the user saying they were finished.
+            session.note_end("max")
 
         if not blocks:
             return None

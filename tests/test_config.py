@@ -129,7 +129,7 @@ def test_validate_accepts_every_documented_mode():
         cfg = Config()
         cfg.hotkey.mode = mode
         validate_config(cfg)
-    for submit in ("auto", "voice"):
+    for submit in ("auto", "always", "voice"):
         cfg = Config()
         cfg.hotkey.submit = submit
         validate_config(cfg)
@@ -149,14 +149,28 @@ def test_validate_rejects_an_unknown_mode():
 
 def test_validate_rejects_an_unknown_submit():
     cfg = Config()
-    cfg.hotkey.submit = "always"
+    cfg.hotkey.submit = "sometimes"
 
     with pytest.raises(ValueError) as err:
         validate_config(cfg)
 
     message = str(err.value)
-    assert "always" in message
-    assert "auto" in message and "voice" in message
+    assert "sometimes" in message
+    # All three, so the fix is in the error and not in the docs.
+    assert "auto" in message and "always" in message and "voice" in message
+
+
+def test_always_is_a_documented_submit_mode(tmp_path):
+    # The pre-0.5 behavior, kept for anyone whose hands-free flow relied on a
+    # pause sending the turn.
+    from bol.config import SUBMIT_MODES
+
+    assert SUBMIT_MODES == ("auto", "always", "voice")
+    path = tmp_path / "config.toml"
+    path.write_text('[hotkey]\nsubmit = "always"\n')
+    cfg = load_config(path)
+    assert cfg.hotkey.submit == "always"
+    validate_config(cfg)
 
 
 def test_validate_rejects_an_unknown_pill_position():

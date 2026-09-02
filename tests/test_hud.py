@@ -391,3 +391,50 @@ async def test_a_hung_child_is_killed_on_stop():
     await asyncio.wait_for(hud.stop(), timeout=5)
     assert hung.stdin.closed is True
     assert hung.killed is True
+
+
+# ------------------------------------------------------------ per-line hold
+
+# "Sent" is one word and one second. A line the user is meant to read (the
+# hint after a paste auto-send held back) needs longer than the state table's
+# default, and only that line does.
+
+
+def test_a_caller_can_outstay_the_state_default():
+    assert hold_for("sending", 2.5) == 2.5
+    assert hold_for("sending") == 1.0  # every other "Sent" is unchanged
+    assert hold_for("listening", 2.5) == 2.5
+
+
+def test_a_hold_of_zero_leaves_the_state_default_alone():
+    assert hold_for("sending", 0.0) == 1.0
+    assert hold_for("thinking", 0.0) == 0.0
+
+
+def test_the_hold_survives_the_pipe():
+    line = json.dumps({"state": "sending", "text": "Pasted.", "hold": 2.5})
+    update = parse_line(line)
+    assert update == Update("sending", "Pasted.", "", 2.5)
+    assert hold_for(update.state, update.hold) == 2.5
+
+
+@pytest.mark.parametrize("value", ["soon", None, -1, 0, 10 ** 6, [2.5]])
+def test_an_unusable_hold_costs_the_override_not_the_line(value):
+    # Same rule as every other field: a nonsense value must never be the
+    # thing that stops the pill from saying what Bol is doing. A hold with no
+    # ceiling would wedge a transient line on screen, which is worse.
+    update = parse_line(json.dumps({"state": "sending", "text": "Sent", "hold": value}))
+    assert update == Update("sending", "Sent", "", 0.0)
+
+
+async def test_set_sends_a_hold_only_when_there_is_one():
+    hud, spawner = await _hud()
+    hud.set("sending", "Sent")
+    hud.set("sending", "Pasted.", hold=2.5)
+    await hud.idle()
+
+    assert spawner.procs[0].stdin.lines == [
+        {"state": "sending", "text": "Sent", "detail": ""},
+        {"state": "sending", "text": "Pasted.", "detail": "", "hold": 2.5},
+    ]
+    await hud.stop()
