@@ -34,6 +34,11 @@ dependencies = [
 [project.optional-dependencies]
 stt = ["parakeet-mlx>=0.3"]
 llm = ["mlx-lm>=0.24"]
+# "hey Bol". sherpa-onnx is a 2 MB wheel plus its 9.5 MB core (which bundles
+# onnxruntime), and it is loaded only in the wake child process, never in the
+# daemon. sentencepiece turns a wake phrase into the BPE pieces the keyword
+# model can actually emit; without it a phrase can only be guessed at.
+wake = ["sherpa-onnx>=1.13", "sentencepiece>=0.2"]
 # misaki's G2P needs spacy + friends; we list them directly instead of
 # misaki[en] because that extra drags in torch (~500MB) via
 # spacy-curated-transformers, which the mlx pipeline never uses.
@@ -48,7 +53,7 @@ kokoro = [
     "espeakng-loader",
     "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
 ]
-all = ["bol[stt,llm,kokoro]"]
+all = ["bol[stt,llm,kokoro,wake]"]
 
 [project.urls]
 Homepage = "https://bol-voice.vercel.app"

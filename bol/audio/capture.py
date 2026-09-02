@@ -140,6 +140,10 @@ class Recorder:
         self._sink: asyncio.Queue[np.ndarray] | None = None
         # The live listener for the recording in flight, if it asked for one.
         self._tap = None
+        # Wake mode's listener: unlike a tap it is not tied to a recording,
+        # it sees every block for as long as the stream runs.
+        self._monitor = None
+        self._hold_open = False
         self._ring: deque[np.ndarray] = deque(maxlen=max(1, _RING_MS // BLOCK_MS))
         self._warm_task: asyncio.Task | None = None
         self._logged_latency = False
@@ -194,6 +198,12 @@ class Recorder:
             mono = mono.astype(np.float32) / float(np.iinfo(mono.dtype).max)
         block = np.asarray(mono, dtype=np.float32).copy()
         self._ring.append(block)
+        # Wake mode's ear, fed before anything else can fail: it listens
+        # between recordings, which is exactly when the sink and the tap are
+        # both empty.
+        monitor = self._monitor
+        if monitor is not None:
+            _feed_tap(monitor, block)
         sink, loop = self._sink, self._loop
         if sink is not None and loop is not None:
             loop.call_soon_threadsafe(sink.put_nowait, block)
@@ -227,6 +237,31 @@ class Recorder:
         # Same argument for the gate: loading Silero at the first press would
         # put its model load between the key and the first syllable.
         self.speech_gate()
+
+    async def monitor(self, listener) -> None:
+        """Forward every captured block to `listener` and keep the mic open.
+
+        Wake mode's one-microphone rule. The daemon already owns a stream and
+        a 2 s ring; the keyword listener reads the blocks that stream is
+        producing anyway rather than opening a second device, so there is one
+        device session, one recording indicator, and nothing to contend with
+        when a recording starts.
+
+        The warm window is suspended for as long as a listener is set: warm_s
+        exists to give a Bluetooth headset its profile back between
+        recordings, and wake mode is a deliberate decision to hold the mic.
+        Pass None to stop forwarding and hand the device back to that timer.
+        """
+        self._monitor = listener
+        self._hold_open = listener is not None
+        if listener is None:
+            self._schedule_warm_release()
+            return
+        self._loop = asyncio.get_running_loop()
+        self._cancel_warm()
+        if self._stream is None:
+            self._build()
+        self._start_stream()
 
     def _start_stream(self) -> None:
         if self._running:
@@ -273,6 +308,8 @@ class Recorder:
     def _schedule_warm_release(self) -> None:
         if self._stream is None:
             return  # already discarded; nothing to hold open
+        if self._hold_open:
+            return  # wake mode is listening; the warm window does not apply
         warm = float(self._cfg.warm_s)
         if warm <= 0 or self._loop is None:
             self._stop_stream()
@@ -292,6 +329,8 @@ class Recorder:
         self._cancel_warm()
         self._sink = None
         self._tap = None
+        self._monitor = None
+        self._hold_open = False
         self._discard()
 
     def _pre_roll(self) -> list[np.ndarray]:

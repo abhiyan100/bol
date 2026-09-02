@@ -11,6 +11,10 @@ shorter text, a "type ..." prefix, and submit = "voice" all paste without it,
 and "send it" always submits. The Stop hook closes the loop by speaking what
 happened.
 
+With [wake] enabled = true, "hey Bol" starts a recording without the key, and
+for awake_s afterwards the next thing said needs no phrase at all. See
+bol/wake for what that costs and how it is kept off the daemon's own process.
+
 While the user is still talking the pill shows the words as they are decoded.
 That path is display only and stops at the pill: the text that reaches Claude
 is always the one full-buffer decode taken after the recording ends.
@@ -22,6 +26,7 @@ import asyncio
 import logging
 import queue
 import sys
+import time
 from pathlib import Path
 
 from .audio import Recorder
@@ -37,6 +42,7 @@ from .llm import LLMEngine
 from .speak import build_speaker, play_cue
 from .stt import STREAM_END, build_transcriber
 from .summarize import build_summarizer
+from .wake import WakeListener, strip_wake_phrase
 
 log = logging.getLogger("bol")
 
@@ -52,6 +58,15 @@ def _drain(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc is not None:
         log.warning("background task failed: %s", exc)
+
+
+# What one recording left behind, and therefore whether the microphone stays.
+#   CHAIN: words were handled and the conversation is still Bol's to continue.
+#   QUIET: nobody said anything worth keeping. The mic may reopen, but only
+#          because something else (hands-free, an awake window) says so.
+#   STOP:  the turn left Bol. Claude has it, or Bol went to sleep, or the
+#          capture failed and reopening would be a spin loop.
+CHAIN, QUIET, STOP = "chain", "quiet", "stop"
 
 
 # How often the pill may be redrawn with streamed words. Past about four a
@@ -118,7 +133,7 @@ class _LiveWords:
 
 
 class Daemon:
-    def __init__(self, cfg: Config, text_mode: bool = False) -> None:
+    def __init__(self, cfg: Config, text_mode: bool = False, clock=time.monotonic) -> None:
         # Fail here, with the list of valid values, rather than arming a
         # hotkey whose mode nothing in the listener recognises.
         validate_config(cfg)
@@ -140,6 +155,13 @@ class Daemon:
         self.recorder = Recorder(cfg.audio)
         self.transcriber = None if text_mode else build_transcriber(cfg)
         self.hotkey: HotkeyListener | None = None
+        # Wake mode, when [wake] enabled = true and the extra is installed.
+        # None the rest of the time, and every wake path checks for it.
+        self.wake: WakeListener | None = None
+        # Monotonic seconds; injected so the awake window can be tested
+        # without a test that sleeps for a minute.
+        self._clock = clock
+        self._awake_until = 0.0
         # The on-screen pill. Inert until start(), and every call on it is a
         # no-op when the child is missing.
         self.hud = Hud(enabled=cfg.ui.pill, position=cfg.ui.position)
@@ -201,21 +223,24 @@ class Daemon:
             return
 
         await self._open_microphone()
+        await self._start_wake()
 
         self.hotkey = HotkeyListener(
             self.cfg.hotkey, self._hotkey_pressed, self._hotkey_released
         )
         self.hotkey.start()
         key = self.cfg.hotkey.key
+        phrase = self._wake_phrase()
         if self.cfg.hotkey.mode == "auto":
-            print(f"bol: tap or hold {key} to talk. Ctrl+C to quit.")
+            print(f"bol: tap or hold {key}{phrase} to talk. Ctrl+C to quit.")
         else:
             mode = self.cfg.hotkey.mode.replace("_", "-")
-            print(f"bol: hold {key} to talk ({mode}). Ctrl+C to quit.")
+            print(f"bol: hold {key}{phrase} to talk ({mode}). Ctrl+C to quit.")
         try:
             await asyncio.Event().wait()
         finally:
             self.hotkey.stop()
+            await self._stop_wake()
             await self.hud.stop()
             await self.recorder.close()
             await self.server.stop()
@@ -265,22 +290,111 @@ class Daemon:
         else:
             print("bol: using the system default microphone instead.")
 
+    # --------------------------------------------------------------------- wake
+
+    async def _start_wake(self) -> None:
+        """Arm "hey Bol", if it is switched on and able to run.
+
+        Every way this can fail is a warning and a daemon that carries on with
+        the hotkey: a missing extra, a missing model, a child that will not
+        start. Wake is a second way in, never the only one.
+        """
+        if not self.cfg.wake.enabled or self.text_mode or self.transcriber is None:
+            return
+        listener = WakeListener(self.cfg.wake, self._wake_detected, clock=self._clock)
+        if not await listener.start():
+            return
+        try:
+            # One microphone owner: the listener reads the blocks the daemon's
+            # own stream is already producing, and that stream now stays up.
+            await self.recorder.monitor(listener.feed)
+        except Exception as exc:
+            # No microphone to share, which _open_microphone has already said
+            # its piece about. The hotkey is still worth arming.
+            log.warning("wake mode needs the microphone and could not have it: %s", exc)
+            await listener.stop()
+            return
+        self.wake = listener
+
+    async def _stop_wake(self) -> None:
+        listener, self.wake = self.wake, None
+        if listener is None:
+            return
+        await self.recorder.monitor(None)
+        await listener.stop()
+
+    def _wake_phrase(self) -> str:
+        """What to add to the startup line when wake is armed."""
+        if self.wake is None:
+            return ""
+        first = next(iter(self.cfg.wake.phrases), "hey bol")
+        return f', or say "{first}",'
+
+    def _wake_detected(self, score: float) -> None:
+        """The child heard the phrase. From here on this is exactly a tap.
+
+        Same pill, same pre-roll, same silence endpointing, same auto-send
+        rules: the only difference is what started it. Ignored while a
+        recording is already running, because that recording is the answer to
+        whatever the user is saying now.
+        """
+        if self.wake is None or self._asleep:
+            return
+        if self._listen_lock.locked() or self._pending_listen:
+            return
+        log.info("wake phrase heard (%.2f)", score)
+        self.hud.set("listening", "Listening")
+        self._touch_awake()
+        self._prewarm()
+        session = self.recorder.begin()
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.speaker.stop()).add_done_callback(_drain)
+        listen = loop.create_task(self._listen_session(session, until_silence=True))
+        listen.add_done_callback(_drain)
+
+    def _touch_awake(self) -> None:
+        """Start (or extend) the window in which no wake phrase is needed."""
+        if self.wake is None:
+            return
+        self._awake_until = self._clock() + float(self.cfg.wake.awake_s)
+
+    def _awake(self) -> bool:
+        return self.wake is not None and self._clock() < self._awake_until
+
+    def _idle_pill(self) -> None:
+        """Clear the pill, or leave the awake dot up if the window is open."""
+        self.hud.set("awake" if self._awake() else "idle")
+
+    def _mute_wake(self) -> None:
+        if self.wake is not None:
+            self.wake.mute()
+
+    def _unmute_wake(self) -> None:
+        if self.wake is not None:
+            self.wake.unmute()
+
     # ---------------------------------------------------------------- listening
+
+    def _prewarm(self) -> None:
+        """Warm the KV cache for the next LLM call while the user speaks:
+        api mode cleans the transcript first; local mode's next call is the
+        persona summary."""
+        if self.cfg.llm.provider == "api":
+            self.engine.prewarm(CLEANUP_SYSTEM)
+            return
+        system = getattr(self.summarizer, "system_prompt", None)
+        if system:
+            self.engine.prewarm(system)
 
     def _hotkey_pressed(self) -> None:
         # First line on purpose: the pill has to appear on the keystroke, not
         # after the mic, the prewarm, or anything else this press starts.
         self.hud.set("listening", "Listening")
         self._asleep = False
-        # Warm the KV cache for the next LLM call while the user speaks:
-        # api mode cleans the transcript first; local mode's next call is
-        # the persona summary.
-        if self.cfg.llm.provider == "api":
-            self.engine.prewarm(CLEANUP_SYSTEM)
-        else:
-            system = getattr(self.summarizer, "system_prompt", None)
-            if system:
-                self.engine.prewarm(system)
+        # A tap opens the awake window too: having reached for the key once,
+        # the user should not have to reach for it again to say the next thing.
+        self._touch_awake()
+        self._prewarm()
         # The session token is minted HERE, synchronously, so a release that
         # lands before recording starts still stops exactly this session.
         session = self.recorder.begin()
@@ -353,18 +467,31 @@ class Daemon:
             async with self._listen_lock:
                 self._pending_listen = False
                 while True:
-                    reopen = await self._capture_and_handle(session, until_silence)
-                    if (
-                        not reopen
-                        or not self.cfg.hands_free
-                        or self._asleep
-                        or self.transcriber is None
-                    ):
+                    outcome = await self._capture_and_handle(session, until_silence)
+                    if not self._reopens(outcome):
                         break
                     session = self.recorder.begin()
                     until_silence = True
         finally:
             self._pending_listen = False
+
+    def _reopens(self, outcome: str) -> bool:
+        """Whether the mic goes straight back up after this recording.
+
+        Two independent reasons it might. Hands-free chains one handled
+        utterance into the next, and has done since v0.1. An open awake
+        window also reopens after a recording that heard nothing, which is
+        the whole point of the window: "hey Bol" is said once, and the pauses
+        in the minute that follows are pauses, not the end of the
+        conversation. Neither reopens after a STOP, so a turn handed to
+        Claude stays handed over and a dead microphone is not retried in a
+        tight loop.
+        """
+        if self._asleep or self.transcriber is None or outcome == STOP:
+            return False
+        if outcome == CHAIN and self.cfg.hands_free:
+            return True
+        return self._awake()
 
     def _start_live(self, session) -> _LiveWords | None:
         """Put words in the pill while this recording runs, if we can.
@@ -405,9 +532,13 @@ class Daemon:
             # runs on the finished recording either way.
             log.debug("live words failed: %s", exc)
 
-    async def _capture_and_handle(self, session, until_silence: bool) -> bool:
+    async def _capture_and_handle(self, session, until_silence: bool) -> str:
         self._active_session = session
         self._active_hands_free = until_silence
+        # The wake listener and this recording are the same microphone. Bol
+        # is already listening properly, so the keyword model has nothing to
+        # add and every chance to hear the dictation as a wake.
+        self._mute_wake()
         try:
             live = self._start_live(session)
             try:
@@ -432,11 +563,11 @@ class Daemon:
                 await self._speak(
                     "Lost the microphone. Check your input device.", state="error"
                 )
-                return False
+                return STOP
             if audio is None:
                 log.debug("no speech captured")
-                self.hud.set("idle")
-                return False
+                self._idle_pill()
+                return QUIET
             # The mic is closed and the words are on their way to the model:
             # say so, because this is the part with a wait in it.
             self.hud.set("finalizing", "Finalizing")
@@ -446,12 +577,20 @@ class Daemon:
             except Exception as exc:
                 log.warning("transcription failed: %s", exc)
                 await self._speak("Couldn't transcribe that one. Try again.", state="error")
-                return False
+                return STOP
+            if self.cfg.wake.enabled:
+                # The wake phrase started the recording; it is not part of
+                # what was dictated, and the grammar must never see it.
+                text = strip_wake_phrase(text, self.cfg.wake.phrases)
             if not text:
-                self.hud.set("idle")
-                return False
+                self._idle_pill()
+                return QUIET
             print(f"you: {text}")
-            return await self._handle_utterance(text)
+            # Words heard is the evidence the conversation is still going, so
+            # the awake window is measured from the last thing said, not from
+            # the wake that opened it.
+            self._touch_awake()
+            return CHAIN if await self._handle_utterance(text) else STOP
         finally:
             self._active_session = None
             # This recording is over however it ended, so no stale tap state
@@ -461,11 +600,22 @@ class Daemon:
             if self._ptt_session is session:
                 self._ptt_session = None
             self._clear_tap()
+            # However this ended, the keyword model gets its ear back, after
+            # the same tail that follows Bol speaking.
+            self._unmute_wake()
 
     async def _auto_listen(self) -> None:
         """Reopen the mic after Bol speaks (hook-driven). No-op if a listen
-        is already running or queued."""
-        if not self.cfg.hands_free or self._asleep or self.text_mode:
+        is already running or queued.
+
+        An open awake window counts as hands-free for as long as it lasts:
+        the user said "hey Bol" a moment ago, Bol has just answered, and
+        making them say it again to reply is the thing wake mode exists to
+        avoid.
+        """
+        if not (self.cfg.hands_free or self._awake()):
+            return
+        if self._asleep or self.text_mode:
             return
         if self.transcriber is None:
             return
@@ -571,7 +721,7 @@ class Daemon:
             )
             # The words are in Claude's box where the user can see them, so
             # the pill has nothing left to say.
-            self.hud.set("idle")
+            self._idle_pill()
             return True
         if action is Action.SEND:
             self._permission_session = None
@@ -583,7 +733,7 @@ class Daemon:
         if action is Action.DISCARD:
             # C-u wipes Claude Code's input line.
             await self.bridge.inject_keys("C-u")
-            self.hud.set("idle")
+            self._idle_pill()
             self._cue("discard")
             return True
         if action is Action.INTERRUPT:
@@ -592,6 +742,9 @@ class Daemon:
             return True
         if action is Action.SLEEP:
             self._asleep = True
+            # "Stop listening" closes the awake window too, or the next pause
+            # would reopen the mic Bol was just told to leave alone.
+            self._awake_until = 0.0
             self.hud.set("idle")
             print("bol: sleeping. Press the hotkey when you need me.")
             return False
@@ -608,14 +761,19 @@ class Daemon:
             self._last_reply = text
             print(f"bol: {text}")
             self.hud.set(state, pill or text)
+            # Bol's own voice is the loudest thing this microphone will hear
+            # all day, and "hey Bol" is a phrase Bol says. Deaf while
+            # speaking, and for the tail after it.
+            self._mute_wake()
             try:
                 await self.speaker.speak(text)
             finally:
+                self._unmute_wake()
                 # An error and a permission question stay on screen: one is a
                 # remedy to read, the other a question still waiting for its
                 # answer. Both leave on their own, or on the next state.
                 if state == "speaking":
-                    self.hud.set("idle")
+                    self._idle_pill()
 
     # ---------------------------------------------------------------- sessions
 

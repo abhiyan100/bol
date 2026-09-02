@@ -86,6 +86,23 @@ VAD_MODES = ("silero", "energy")
 
 
 @dataclass
+class WakeConfig:
+    # "hey Bol", the hands-free way to start a recording. Off by default:
+    # it is the one feature that keeps the microphone open all day, and that
+    # is a decision to make on purpose rather than inherit.
+    enabled: bool = False
+    # What to listen for. Bol matches the spellings a speech model actually
+    # produces for each phrase (for "hey bol": "hey bowl" and "hey ball" too).
+    phrases: list = field(default_factory=lambda: ["hey bol"])
+    # Trigger probability. Lower hears more, including the TV. Measured
+    # against two macOS voices: 0.12 wakes on both, and a 20 second paragraph
+    # full of "ball", "bowl" and "hello" wakes on none.
+    threshold: float = 0.12
+    # After a wake or a tap, the next thing you say needs no wake phrase.
+    awake_s: float = 60.0
+
+
+@dataclass
 class TtsConfig:
     engine: str = "say"  # say | kokoro | none
     say_voice: str = ""  # empty = system default
@@ -198,6 +215,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
+    wake: WakeConfig = field(default_factory=WakeConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
@@ -245,8 +263,8 @@ def load_config(path: Path | None = None) -> Config:
         if "sound_cues" in data:
             cfg.sound_cues = data["sound_cues"]
         for name in (
-            "audio", "stt", "hotkey", "tts", "llm", "cleanup", "vocabulary",
-            "summarizer", "bridge", "server", "ui",
+            "audio", "stt", "hotkey", "wake", "tts", "llm", "cleanup",
+            "vocabulary", "summarizer", "bridge", "server", "ui",
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
@@ -273,6 +291,38 @@ def validate_config(cfg: Config) -> None:
     _one_of("[hotkey] submit", cfg.hotkey.submit, SUBMIT_MODES)
     _one_of("[ui] position", cfg.ui.position, UI_POSITIONS)
     _one_of("[audio] vad", cfg.audio.vad, VAD_MODES)
+    validate_wake(cfg.wake)
+
+
+def validate_wake(wake: WakeConfig) -> None:
+    """Reject a wake section that would arm a listener with nothing to hear.
+
+    Only checked when wake is on: a nonsense threshold in a disabled section
+    is a note someone left themselves, not a reason to refuse to start.
+    """
+    if not wake.enabled:
+        return
+    phrases = wake.phrases if isinstance(wake.phrases, list) else []
+    cleaned = [p for p in phrases if isinstance(p, str) and p.strip()]
+    if not cleaned:
+        raise ValueError(
+            '[wake] enabled = true needs at least one phrase, e.g. phrases = ["hey bol"].'
+        )
+    try:
+        threshold = float(wake.threshold)
+    except (TypeError, ValueError):
+        raise ValueError(f"[wake] threshold must be a number, not {wake.threshold!r}.")
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError(
+            f"[wake] threshold must be above 0 and at most 1, not {threshold}. "
+            "Lower hears more, including the TV."
+        )
+    try:
+        awake = float(wake.awake_s)
+    except (TypeError, ValueError):
+        raise ValueError(f"[wake] awake_s must be a number, not {wake.awake_s!r}.")
+    if awake < 0:
+        raise ValueError(f"[wake] awake_s cannot be negative, got {awake}.")
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -294,6 +344,20 @@ key = "alt_r"          # right Option
 tap_ms = 400           # a press shorter than this counts as a tap, not a hold
 submit = "auto"        # auto: dictation submits itself | "voice": only "send it" submits
 auto_send_min_words = 3  # shorter than this is pasted, not sent; "send it" still submits
+
+[wake]
+# "hey Bol", so you can start talking without reaching for the key. Off by
+# default, and here is what turning it on actually does.
+#   Wake mode keeps the microphone open and runs a small keyword model on
+#   your Mac. Nothing is recorded or sent anywhere. Expect the occasional
+#   false wake from TV or conversation; a false wake costs a Listening pill,
+#   and nothing is sent unless you say three words.
+# Turn your wifi off and try it: it still works. `bol setup` downloads the
+# 5 MB keyword model when this is true.
+enabled = false
+phrases = ["hey bol"]  # Bol also listens for "hey bowl" and "hey ball"
+threshold = 0.12       # trigger probability; lower hears more, including the TV
+awake_s = 60           # after a wake or a tap, the next thing you say needs no phrase
 
 # Remap any voice command to whatever you like. Unset keys keep defaults.
 # [commands]

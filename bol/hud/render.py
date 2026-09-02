@@ -15,6 +15,7 @@ from dataclasses import dataclass
 # on a line nobody can explain.
 STATES = (
     "idle",
+    "awake",
     "listening",
     "finalizing",
     "sending",
@@ -28,6 +29,9 @@ STATES = (
 # and a permission question are statements, not activity.
 COLORS = {
     "idle": "",
+    # Wake mode's awake window: nothing is being recorded, but the next thing
+    # said needs no wake phrase, and that is worth one dot on screen.
+    "awake": "green",
     "listening": "green",
     "finalizing": "blue",
     "sending": "",
@@ -43,6 +47,9 @@ HOLD_S = {"sending": 1.0, "error": 3.0}
 
 # Used when the caller sends a state with no text of its own.
 DEFAULTS = {
+    # One word, because the pill hides itself when a state has nothing to
+    # say: an awake window drawn as a bare dot would be an unexplained light.
+    "awake": "Awake",
     "listening": "Listening",
     "finalizing": "Finalizing",
     "sending": "Sent",

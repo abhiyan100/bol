@@ -613,3 +613,76 @@ async def test_the_pre_roll_primes_the_gate_without_voting(monkeypatch):
 
     assert await _record(recorder, second, until_silence=True) is None
     assert gate.script == []  # the pre-roll was fed, and then ignored
+
+
+# ------------------------------------------------------------ the wake monitor
+
+
+async def test_the_monitor_hears_every_block_the_stream_produces(monkeypatch):
+    # Wake mode's one-microphone rule: the keyword listener reads the blocks
+    # this stream is already producing, with no recording in flight and no
+    # second device opened.
+    heard = []
+    recorder = Recorder(_cfg())
+    opened = _fake_sd(monkeypatch, _speech(6))
+
+    await recorder.open()
+    await recorder.monitor(heard.append)
+    await asyncio.sleep(0.05)
+    await recorder.close()
+
+    assert opened[0].starts == 1
+    assert len(heard) >= 5
+    assert all(block.dtype == np.float32 for block in heard)
+
+
+async def test_the_monitor_suspends_the_warm_window(monkeypatch):
+    # warm_s exists to give a Bluetooth headset its profile back between
+    # recordings. Wake mode is a deliberate decision to hold the mic instead,
+    # so the timer that would release it must not fire.
+    recorder = Recorder(_cfg(warm_s=0.01))
+    session = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=session.request_stop)
+
+    await recorder.open()
+    await recorder.monitor(lambda _block: None)
+    await _record(recorder, session, until_silence=False, close=False)
+    await asyncio.sleep(0.05)
+
+    assert opened[0].active  # still listening, warm window or not
+    await recorder.close()
+
+
+async def test_dropping_the_monitor_hands_the_device_back(monkeypatch):
+    recorder = Recorder(_cfg(warm_s=0.01))
+    opened = _fake_sd(monkeypatch, _speech(4))
+
+    await recorder.open()
+    await recorder.monitor(lambda _block: None)
+    await asyncio.sleep(0.02)
+    assert opened[0].active
+
+    await recorder.monitor(None)
+    await asyncio.sleep(0.05)
+
+    assert not opened[0].active
+    await recorder.close()
+
+
+async def test_a_monitor_that_raises_never_costs_the_recording(monkeypatch):
+    # Same rule as the live-words tap: a spectator that throws must not take
+    # the audio callback, and with it the microphone, down with it.
+    def explode(_block):
+        raise RuntimeError("the wake child died mid-frame")
+
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(8), on_exhausted=session.request_stop)
+
+    await recorder.open()
+    await recorder.monitor(explode)
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    assert audio.size >= 6 * BLOCK
+    assert opened[0].starts == 1

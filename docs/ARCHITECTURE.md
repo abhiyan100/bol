@@ -154,6 +154,21 @@ Past 20 s the window slides and degrades to the short-context behavior
 rather than falling behind. Lead silence, bigger first chunks and deeper
 exact layers were all tried and changed nothing.
 
+**"Hey Bol" is a 5 MB keyword model in its own process, not the ASR.**
+Running the 0.6B recognizer on room audio all day would heat a laptop and
+false-trigger on media, and every wake-word library was checked before
+choosing: Vosk has had no macOS wheel since 2022, openWakeWord is broken on
+Apple Silicon, Porcupine's free tier ended in June 2026. sherpa-onnx keyword
+spotting (Apache-2.0, arm64 wheel, zipformer int8, open-vocabulary keywords
+as text) runs in `bol/wake/listener.py`, fed 32 ms frames over a pipe from
+the daemon's one microphone stream, so there is one mic owner and one
+indicator. A detection is treated exactly like a tap: the ring's pre-roll
+captures the words right after the phrase, the phrase is stripped before
+the grammar, endpointing and auto-send rules apply unchanged. Measured:
+2.5 percent of one core idle, detection at threshold 0.12 on two synthetic
+voices with no false wakes on 30 s of speech. Muted while Bol speaks and
+for 500 ms after, and a 60 s awake window means follow-ups need no phrase.
+
 **The pill is a separate process.** State on screen (listening, finalizing,
 thinking with the running tool, permission, speaking, error with its remedy)
 is drawn by `bol/hud/app.py`, a PyObjC child fed JSON lines over stdin. Not
@@ -189,6 +204,7 @@ STT provider protocol especially.
 | `bol/bridge/focused.py` | Frontmost-app paste injection with terminal allowlist |
 | `bol/bridge/tmux.py` | Pane discovery/pinning/verification, paste injection, key sends |
 | `bol/hud/` | On-screen pill: `Hud` client, AppKit child (`app.py`), pure render table |
+| `bol/wake/` | "hey Bol": sherpa-onnx keyword spotter child, model download, phrase stripping |
 | `bol/mlx_thread.py` | The one thread every in-process MLX model runs on |
 | `bol/hooks/server.py` | Loopback aiohttp receiver for hook events |
 | `bol/hooks/events.py` | Typed payload views + per-turn tool accumulation |

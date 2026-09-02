@@ -550,6 +550,52 @@ def probe_weights(cfg) -> list[tuple[str, str, str]]:
     return rows or [(INFO, "models: none needed by this config", "")]
 
 
+def probe_wake(cfg) -> list[tuple[str, str, str]]:
+    """"hey Bol": the extra, the model, and what it is listening for.
+
+    One informational row when wake is off, because a feature nobody switched
+    on has no failures to report and should not add noise to `bol doctor`.
+    """
+    from .wake import (
+        all_spellings,
+        human_size,
+        missing_files,
+        model_dir,
+        model_present,
+        wake_available,
+    )
+
+    if not cfg.wake.enabled:
+        return [(INFO, 'wake phrase: off ([wake] enabled = false)', "")]
+    rows = []
+    if wake_available():
+        rows.append((OK, "sherpa-onnx (wake phrase)", ""))
+    else:
+        rows.append((
+            BAD,
+            "sherpa-onnx not installed, so [wake] enabled = true does nothing",
+            install_hint("stt,llm,wake"),
+        ))
+    root = model_dir()
+    if model_present(root):
+        size = sum(p.stat().st_size for p in root.glob("*") if p.is_file())
+        rows.append((OK, f"keyword model: {root} ({human_size(size)} on disk)", ""))
+    else:
+        rows.append((
+            BAD,
+            f"keyword model: not in {root} ({', '.join(missing_files(root))})",
+            "run `bol setup` to fetch it",
+        ))
+    heard = ", ".join(all_spellings(cfg.wake.phrases)) or "nothing"
+    rows.append((
+        INFO,
+        f"listening for: {heard} (threshold {float(cfg.wake.threshold):g}, "
+        f"awake for {float(cfg.wake.awake_s):g}s after a wake or a tap)",
+        "",
+    ))
+    return rows
+
+
 def probe_injection(cfg) -> list[tuple[str, str, str]]:
     return [probe_frontmost(cfg), probe_tmux(cfg)]
 
@@ -798,10 +844,16 @@ def cmd_setup(_args: argparse.Namespace) -> int:
     print(f"config: {'already at' if existed else 'written to'} {path}\n")
 
     ok = _setup_models(cfg)
+    ok = _setup_wake(cfg) and ok
     _setup_hooks(cfg)
 
     print("\nchecks (macOS asks for permission the first time):")
-    rows = probe_permissions(cfg) + probe_wiring(cfg) + probe_injection(cfg)
+    rows = (
+        probe_permissions(cfg)
+        + probe_wiring(cfg)
+        + probe_wake(cfg)
+        + probe_injection(cfg)
+    )
     ok = _print_rows(rows) and ok
 
     if ok:
@@ -873,6 +925,51 @@ def _setup_models(cfg) -> bool:
     return ok
 
 
+def _setup_wake(cfg) -> bool:
+    """Fetch the keyword model, but only if wake mode is switched on.
+
+    Same shape as the model budget above: say what it costs, then spend it.
+    Nobody who left [wake] enabled = false pays a download for a feature they
+    did not ask for.
+    """
+    from .wake import (
+        DISK_BYTES,
+        DOWNLOAD_BYTES,
+        MODEL_NAME,
+        download_model,
+        human_size,
+        model_dir,
+        model_present,
+        wake_available,
+    )
+
+    if not cfg.wake.enabled:
+        print('wake phrase: off ([wake] enabled = false in your config).\n')
+        return True
+    root = model_dir()
+    if model_present(root):
+        print(f"wake phrase: keyword model already at {root}\n")
+        return True
+    if not wake_available():
+        print(
+            "wake phrase: [wake] enabled = true, but sherpa-onnx is not "
+            f"installed. {install_hint('stt,llm,wake')}\n"
+        )
+        return False
+    print(
+        f"wake phrase: downloading {MODEL_NAME}\n"
+        f"  {human_size(DOWNLOAD_BYTES)} to download, about "
+        f"{human_size(DISK_BYTES)} kept in {root}"
+    )
+    try:
+        download_model(root)
+    except Exception as exc:
+        print(f"bol: could not download the keyword model ({exc}).\n")
+        return False
+    print("wake phrase: keyword model ready.\n")
+    return True
+
+
 def _setup_hooks(cfg) -> None:
     """Show the exact entry going into settings.json, then write it."""
     url = _url(cfg)
@@ -898,6 +995,7 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         ("wiring", probe_wiring(cfg)),
         ("permissions", probe_permissions(cfg)),
         ("models", probe_weights(cfg)),
+        ("wake", probe_wake(cfg)),
         ("injection", probe_injection(cfg)),
     ):
         if not rows:

@@ -32,7 +32,8 @@ bol run
 Requires macOS on Apple Silicon, [Claude Code](https://code.claude.com), and
 [uv](https://docs.astral.sh/uv/). Setup downloads about 3 GB of models
 (speech 2.3 GB, summarizer 0.6 GB, cleanup 0.2 GB), cached after the first
-time. Add `,kokoro` to the extras for a neural voice (0.3 GB more).
+time. Add `,kokoro` to the extras for a neural voice (0.3 GB more), or
+`,wake` for the "hey Bol" wake phrase (5 MB).
 
 ## Why Bol
 
@@ -133,6 +134,14 @@ Running several Claude Code sessions? Bol narrates the first one it hears
 from and tells you when it ignores another. Set `[server] follow = "all"` to
 hear every session.
 
+Want no key at all? Install the `wake` extra, set `[wake] enabled = true`,
+run `bol setup` once to fetch the 5 MB keyword model, and say **"hey Bol"**
+before your prompt. Bol stays awake for a minute after each exchange, so
+follow-ups need no wake word. Wake mode keeps the microphone open and runs
+a small keyword model on your Mac; nothing is recorded or sent anywhere.
+Expect the occasional false wake from a TV or a conversation: it costs a
+Listening pill, and nothing is sent unless you say three words.
+
 No mic handy? `bol talk` gives the identical loop over typed text. Prefer
 focus-independent injection? Run Claude inside tmux and Bol auto-switches to
 pinned-pane mode: `bol launch ~/code/myproject`, then `tmux attach -t bol`.
@@ -159,6 +168,11 @@ vad = "silero"               # decides when you stopped talking; "energy" = fall
 
 [vocabulary]
 words = ["Abhiyan", "Kokoro", "pyproject"]   # names Bol should spell right
+
+[wake]
+enabled = false              # "hey Bol" instead of a key; needs the wake extra
+phrases = ["hey bol"]
+awake_s = 60                 # follow-ups need no wake word for this long
 
 [ui]
 pill = true                  # on-screen state pill; false = sound cues only
