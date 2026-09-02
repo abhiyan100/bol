@@ -287,12 +287,12 @@ def test_speaking_shows_bols_own_sentence():
 def test_permission_asks_for_a_yes_or_a_no():
     label = label_for("permission", "Claude wants to run rm -rf build.")
     assert label.startswith("Claude asks: Claude wants to run rm -rf build.")
-    assert label.endswith("tap and say yes or no")
+    assert label.endswith("say yes or no")
 
 
 def test_permission_without_a_message_still_makes_sense():
     assert label_for("permission") == (
-        "Claude needs your permission · tap and say yes or no"
+        "Claude needs your permission · say yes or no"
     )
 
 

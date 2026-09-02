@@ -15,7 +15,8 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 class AudioConfig:
     sample_rate: int = 16000
     channels: int = 1
-    # Which speech gate decides that a hands-free turn is over.
+    # Which speech gate decides that a recording nobody is holding a key
+    # for is over.
     # silero: Silero v6, a real voice-activity model (ships with Bol).
     # energy: RMS against an adaptive noise floor. Cheaper, and fooled by a
     #         keyboard, a fan, or anyone else in the room.
@@ -23,11 +24,11 @@ class AudioConfig:
     vad: str = "silero"  # silero | energy
     # Endpointing: stop capture after this much trailing silence.
     silence_ms: int = 900
-    # Hands-free only: utterances shorter than this are discarded as noise.
-    # Push-to-talk returns everything captured while the key is held.
+    # Until-silence recordings only: utterances shorter than this are
+    # discarded as noise. Holding the key returns everything captured.
     min_speech_ms: int = 300
     max_utterance_s: int = 90
-    # Hands-free reopen: give up if no speech starts within this window.
+    # Until-silence recordings: give up if no speech starts in this window.
     listen_window_s: int = 8
     # Energy gate only: RMS multiplier over the measured noise floor that
     # counts as speech. Ignored when vad = "silero".
@@ -65,28 +66,13 @@ class SttConfig:
 
 @dataclass
 class HotkeyConfig:
-    # auto: tap to start (Bol ends the turn when you stop talking) or hold to
-    # speak, whichever you did. push_to_talk: hold only. toggle: tap on/off.
-    mode: str = "auto"  # auto | push_to_talk | toggle
+    # Hold to talk, and that is the whole gesture: press the key, speak, let
+    # go, and what you said is pasted where the cursor is. The recording ends
+    # on the release, not on a pause. Nothing is ever submitted by itself;
+    # say "send it" (or your own send phrase) to press Enter.
     key: str = "alt_r"  # pynput key name
-    # auto mode: a press shorter than this is a tap, longer is a hold.
-    tap_ms: int = 400
-    # auto: plain dictation is submitted for you, like pressing Enter, but
-    #       only when you ended the recording on purpose: released the key,
-    #       or tapped a second time. Stop talking instead and the text is
-    #       pasted and waits, because a pause is not the same as "done".
-    # always: submit however the recording ended, pauses included (what auto
-    #       did before; hands-free users who liked that want this).
-    # voice: nothing is submitted until you say "send it".
-    submit: str = "auto"  # auto | always | voice
-    # submit = "auto" only fires on this many words or more. A one-word
-    # misfire ("yes") or a stray noise is pasted, never sent. Saying
-    # "send it" still submits whatever it is riding on, however short.
-    auto_send_min_words: int = 3
 
 
-HOTKEY_MODES = ("auto", "push_to_talk", "toggle")
-SUBMIT_MODES = ("auto", "always", "voice")
 VAD_MODES = ("silero", "energy")
 
 
@@ -97,8 +83,10 @@ class WakeConfig:
     # to switch on is one most people never switch on. false turns the
     # always-on microphone off and leaves the hotkey exactly as it was.
     enabled: bool = True
-    # Start a conversation: a recording with the usual auto-send rules. Bol
-    # matches the spellings a speech model actually produces for each phrase
+    # Start a conversation: a recording that ends when you stop talking, and
+    # is pasted like any other. There is a reply only with talk_back = true;
+    # one-way, this is a second way to start dictating. Bol matches the
+    # spellings a speech model actually produces for each phrase
     # (for "hey bol": "hey bowl" and "hey ball" too).
     phrases: list = field(default_factory=lambda: ["hey bol"])
     # Start dictation: everything said until you pause for pause_ms is pasted
@@ -132,7 +120,7 @@ class WakeConfig:
     # [audio] silence_ms the conversation flow uses: dictating a prompt has
     # thinking pauses in it, and the user asked for three seconds.
     pause_ms: int = 3000
-    # After a wake, a dictation or a tap, the next thing you say needs no
+    # After a wake, a dictation or a hold, the next thing you say needs no
     # trigger word. 0 means only trigger words ever start anything.
     awake_s: float = 60.0
 
@@ -200,17 +188,13 @@ class SummarizerConfig:
 
 @dataclass
 class BridgeConfig:
-    # auto: tmux when a Claude pane exists, else focused-app paste.
-    # focused: always paste into the frontmost terminal (FluidVoice-style).
-    # tmux: always inject into a tmux pane (focus-independent).
-    mode: str = "auto"
-    # tmux pane id (e.g. "%3") to pin; empty = auto-discover.
-    pane: str = ""
+    # There is one bridge: Bol types into the app you are looking at. (A tmux
+    # bridge that injected into a pinned pane lived here until v0.5.)
     enter_delay_s: float = 0.2
-    # Focused mode: bundle ids allowed to receive injection (empty = built-in
-    # terminal allowlist). Guard against dictating into the wrong app.
+    # Bundle ids allowed to receive injection (empty = built-in terminal
+    # allowlist). Guard against dictating into the wrong app.
     allowed_apps: list = field(default_factory=list)
-    # Focused mode: let dictation land wherever the cursor is (Notes, Slack, a
+    # Let dictation land wherever the cursor is (Notes, Slack, a
     # browser box), not only in a terminal or an IDE. Enter is a separate
     # question and stays gated: Bol presses it by itself only in a window
     # running Claude, and anywhere else only when the user asked for it in
@@ -271,21 +255,13 @@ class Config:
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     ui: UiConfig = field(default_factory=UiConfig)
-    # After Bol speaks a reply, automatically open the mic for the next
-    # instruction. Off by default: a mic that reopens unasked hears whatever
-    # the room said next, and a tap is instant anyway. Every hands-free turn
-    # ends on silence, so under submit = "auto" it is pasted and waits for
-    # "send it"; submit = "always" is the old flow where a pause sent it.
-    hands_free: bool = False
-
-    @property
-    def sound_cues(self) -> bool:
-        """Deprecated alias for [ui] sounds. Old config files still work."""
-        return self.ui.sounds
-
-    @sound_cues.setter
-    def sound_cues(self, value: bool) -> None:
-        self.ui.sounds = bool(value)
+    # Speak what Claude did. Off by default, which makes Bol one-way: your
+    # voice goes in, nothing comes back out loud, and no summarizer, no
+    # voice model and no local LLM server are ever loaded. true (or
+    # `bol run --talk-back`) turns the reply on: a spoken summary after every
+    # turn, and the "hey Bol" conversation flow. Either way the cleanup model
+    # loads, because that is part of getting the dictation right.
+    talk_back: bool = False
 
     @property
     def api_key(self) -> str:
@@ -306,17 +282,13 @@ def load_config(path: Path | None = None) -> Config:
     if path.exists():
         with open(path, "rb") as f:
             data = tomllib.load(f)
-        # The old top-level sound_cues, applied first so an explicit
-        # [ui] sounds in the same file still wins.
-        if "sound_cues" in data:
-            cfg.sound_cues = data["sound_cues"]
         for name in (
             "audio", "stt", "hotkey", "wake", "tts", "llm", "cleanup",
             "vocabulary", "summarizer", "bridge", "server", "ui",
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
-        for name in ("hands_free", "commands"):
+        for name in ("talk_back", "commands"):
             if name in data:
                 setattr(cfg, name, data[name])
     return cfg
@@ -338,15 +310,16 @@ def validate_config(cfg: Config) -> None:
     """Reject config values Bol cannot act on.
 
     Called at startup rather than at load, so a typo costs one clear line
-    ("unknown [hotkey] mode ...") instead of a hotkey that quietly never fires.
+    ("unknown [ui] position ...") instead of a pill that never appears.
     """
-    _one_of("[hotkey] mode", cfg.hotkey.mode, HOTKEY_MODES)
-    _one_of("[hotkey] submit", cfg.hotkey.submit, SUBMIT_MODES)
     _one_of("[ui] position", cfg.ui.position, UI_POSITIONS)
     _one_of("[audio] vad", cfg.audio.vad, VAD_MODES)
     # anywhere = "false" is a string, and a non-empty string is truthy, so a
     # quoted value would silently mean the opposite of what it says.
     _flag("[bridge] anywhere", cfg.bridge.anywhere)
+    # Same trap, and this one decides whether a summarizer, a voice and a
+    # local LLM server are loaded at all.
+    _flag("talk_back", cfg.talk_back)
     validate_wake(cfg.wake)
 
 
@@ -405,12 +378,11 @@ def validate_wake(wake: WakeConfig) -> None:
 DEFAULT_CONFIG_TOML = """\
 # Bol configuration. Every key is optional; these are the defaults.
 
-# reopen the mic automatically after Bol speaks. Off by default: a mic that
-# reopens unasked hears whatever the room said next, and tapping the hotkey is
-# instant anyway. A hands-free turn ends when you stop talking, so under
-# submit = "auto" it is pasted and waits for "send it"; set submit = "always"
-# below for the old flow where a pause sent it.
-hands_free = false
+# Speak what Claude did. false is one-way: your voice goes in, nothing comes
+# back out loud, and no summarizer, no voice and no local LLM server are
+# loaded. true adds the spoken summary after every turn and the "hey Bol"
+# conversation flow. `bol run --talk-back` turns it on for one session.
+talk_back = false
 
 [ui]
 pill = true            # the on-screen pill that shows what Bol is doing
@@ -419,19 +391,15 @@ position = "top"       # which edge the pill sits on: "top" | "bottom"
 text = false           # also spell the state out beside the dots
 
 [hotkey]
-mode = "auto"          # tap or hold, whichever you did | "push_to_talk" | "toggle"
-key = "alt_r"          # right Option
-tap_ms = 400           # a press shorter than this counts as a tap, not a hold
-submit = "auto"        # auto: dictation submits itself when you tap again or release the
-                       # key; stop talking instead and it is pasted, waiting for "send it"
-                       # or your next tap. "always": submit however you stopped, pauses
-                       # included. "voice": nothing submits until you say "send it".
-auto_send_min_words = 3  # shorter than this is pasted, not sent; "send it" still submits
+key = "alt_r"          # right Option. Hold it, talk, let go, and what you said is
+                       # pasted where the cursor is. Nothing is ever sent by itself:
+                       # say "send it" to press Enter.
 
 [wake]
 # The trigger words, listened for from the moment Bol starts, so there is no
 # key to press. Say "type" and talk; pause three seconds and it is pasted.
-# Say "send it" and it is sent. Say "hey Bol" for the conversation flow.
+# Say "send it" and it is sent. Say "hey Bol" for the conversation flow,
+# which needs talk_back = true above to have anyone to talk to.
 # Here is what leaving this on actually does.
 #   Wake mode keeps the microphone open and runs a small keyword model on
 #   your Mac. Nothing is recorded or sent anywhere. Expect the occasional
@@ -451,7 +419,7 @@ threshold = 0.12       # trigger probability; lower hears more, including the TV
 # type_threshold = 0.0 # "type" only; 0 = use threshold. Raising it costs the real
 #                      # "type ..." before it costs the one inside "prototype", so
 #                      # if false dictation bothers you, change type_phrases instead.
-awake_s = 60           # after a trigger word or a tap, the next thing you say needs none.
+awake_s = 60           # after a trigger word or a hold, the next thing you say needs none.
                        # 0 = only trigger words ever start anything.
 
 # Remap any voice command to whatever you like. Unset keys keep defaults.
@@ -504,8 +472,6 @@ engine = "auto"        # llm persona when available, template otherwise
 user_name = ""         # your name, spoken in replies
 
 [bridge]
-mode = "auto"          # auto | focused (paste into front terminal) | tmux
-pane = ""              # tmux mode: pane id like "%3"; empty auto-discovers
 anywhere = true        # dictation lands wherever the cursor is: Notes, Slack, a browser
                        # box. Bol presses Enter by itself only when the front window is
                        # running Claude; saying "send it" presses it wherever you are.
@@ -518,24 +484,52 @@ port = 8770
 """
 
 
-# Defaults that changed after a release. A config file written by `bol setup`
-# spells every value out, so an older file keeps pinning the old behavior
-# forever unless someone says so. (section, key, old default, new default,
-# one-line reason). Shown once at startup, never applied automatically.
-SUPERSEDED_DEFAULTS = (
-    ("hotkey", "mode", "push_to_talk", "auto", "tap to talk, hold for push-to-talk"),
+# Keys an older Bol wrote that this one no longer reads. A config file from
+# `bol setup` spells every value out, so a file written before these went away
+# would otherwise sit there looking like it still decides something.
+# (section or None for top level, key, what to do instead). One line each at
+# startup; the key itself is ignored, never migrated.
+REMOVED_KEYS = (
+    ("hotkey", "mode", "[hotkey] mode is gone, hold the key"),
+    (
+        "hotkey",
+        "submit",
+        '[hotkey] submit is gone, nothing is ever sent by itself: say "send it"',
+    ),
+    ("hotkey", "tap_ms", "[hotkey] tap_ms is gone, a tap does nothing now"),
+    (
+        "hotkey",
+        "auto_send_min_words",
+        "[hotkey] auto_send_min_words is gone, no dictation submits itself",
+    ),
+    (
+        None,
+        "hands_free",
+        "hands_free is gone, the awake window ([wake] awake_s) replaces it",
+    ),
+    ("bridge", "mode", "[bridge] mode is gone, Bol types into the app you are in"),
+    ("bridge", "pane", "[bridge] pane is gone with the tmux bridge"),
+    (None, "sound_cues", "sound_cues is gone, use [ui] sounds"),
 )
 
 
-def superseded_defaults(cfg: Config) -> list[str]:
-    """Hints for values in cfg that equal a default an older Bol wrote."""
+def removed_keys(path: Path | None = None) -> list[str]:
+    """Hints for keys in the config file that this Bol no longer reads."""
+    path = path or CONFIG_PATH
+    if not path.exists():
+        return []
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        # An unreadable config is the loader's problem to report, not a
+        # reason for the hints to raise on the way past.
+        return []
     hints = []
-    for section, key, old, new, why in SUPERSEDED_DEFAULTS:
-        if getattr(getattr(cfg, section), key) == old:
-            hints.append(
-                f'[{section}] {key} = "{old}" is the old default; '
-                f'set {key} = "{new}" for {why} ({CONFIG_PATH})'
-            )
+    for section, key, hint in REMOVED_KEYS:
+        table = data if section is None else data.get(section)
+        if isinstance(table, dict) and key in table:
+            hints.append(f"{hint} ({path})")
     return hints
 
 

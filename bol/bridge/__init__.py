@@ -1,4 +1,4 @@
-from .base import AutoBridge, Bridge, BridgeError, build_bridge, explicit_kw
+from .base import Bridge, BridgeError, build_bridge
 from .focused import (
     DEFAULT_ALLOWED_APPS,
     IDE_APPS,
@@ -7,21 +7,15 @@ from .focused import (
     SubmitBlocked,
     frontmost_bundle_id,
 )
-from .tmux import ClaudePane, TmuxBridge, TmuxError
 
 __all__ = [
-    "AutoBridge",
     "Bridge",
     "BridgeError",
     "build_bridge",
-    "explicit_kw",
     "FocusedBridge",
     "SubmitBlocked",
     "frontmost_bundle_id",
     "DEFAULT_ALLOWED_APPS",
     "TERMINAL_APPS",
     "IDE_APPS",
-    "ClaudePane",
-    "TmuxBridge",
-    "TmuxError",
 ]

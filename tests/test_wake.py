@@ -626,12 +626,13 @@ class BlockingRecorder(FakeRecorder):
 
 
 def _wake_daemon(
-    utterances, texts, clock, awake_s=60.0, armed=True, submit="voice", commands=None
+    utterances, texts, clock, awake_s=60.0, armed=True, commands=None
 ):
     cfg = Config()
-    cfg.sound_cues = False
-    cfg.hands_free = False
-    cfg.hotkey.submit = submit
+    cfg.ui.sounds = False
+    # Two-way, because several of these tests are about what Bol says and
+    # when it is deaf while saying it.
+    cfg.talk_back = True
     cfg.wake.enabled = True
     cfg.wake.awake_s = awake_s
     if commands:
@@ -656,7 +657,7 @@ async def test_a_wake_starts_a_recording_exactly_like_a_tap():
     # The pill appears on the detection, before anything the wake starts.
     assert d.hud.calls[0] == ("listening", "Listening", "")
     await asyncio.sleep(0.05)
-    # Ended by the silence gate, not by a key, and pasted under submit=voice.
+    # Ended by the silence gate, not by a key, and pasted rather than sent.
     assert d.recorder.calls == [True]
     assert d.bridge.injected == [("add a login test ", False)]
 
@@ -703,7 +704,6 @@ async def test_the_awake_window_keeps_the_mic_open_through_the_pauses():
     await asyncio.sleep(0.05)
 
     assert d.recorder.calls == [True, True, True, True]
-    assert d.cfg.hands_free is False  # nothing to do with hands-free
 
 
 async def test_words_heard_extend_the_awake_window():
@@ -766,11 +766,11 @@ async def test_the_pill_keeps_a_dot_up_while_the_window_is_open():
     d._wake_detected(0.6)
     await asyncio.sleep(0.05)
 
-    # Pasted, so the pill has nothing left to say, but the window is still
-    # open and that is worth a dot rather than a blank screen. The blank
-    # screen comes back exactly once, when the window finally closes.
+    # The paste says how to send it, and after that the window is still open,
+    # which is worth a dot rather than a blank screen. The blank screen comes
+    # back exactly once, when the window finally closes.
     states = d.hud.states
-    assert states[:3] == ["listening", "finalizing", "awake"]
+    assert states[:4] == ["listening", "finalizing", "sending", "awake"]
     assert states.count("idle") == 1
     assert states[-1] == "idle"
 
@@ -1385,13 +1385,12 @@ async def test_a_hotkey_recording_keeps_every_configured_timing():
     assert session.window_ms is None
 
 
-@pytest.mark.parametrize("submit", ["auto", "always", "voice"])
-async def test_a_type_dictation_never_presses_enter(submit):
-    # "type" means put these characters there. Eight words ended on a pause
-    # would be sent under "always" and under "auto"; not this one.
+async def test_a_type_dictation_never_presses_enter():
+    # "type" means put these characters there, and nothing else does either:
+    # eight words finished on a pause are still only pasted.
     clock = Clock()
     d = _wake_daemon(
-        1, ["add a login test to the auth module"], clock, awake_s=0.0, submit=submit
+        1, ["add a login test to the auth module"], clock, awake_s=0.0
     )
     d.recorder.end_reason = "silence"
 
@@ -1410,7 +1409,7 @@ async def test_a_type_dictation_says_how_to_send_it():
     d._wake_detected(0.6, "type")
     await asyncio.sleep(0.05)
 
-    hint = ("sending", daemon_mod.TYPE_HINT, "")
+    hint = ("sending", daemon_mod.PASTE_HINT, "")
     assert hint in d.hud.calls
     assert d.hud.holds[d.hud.calls.index(hint)] == daemon_mod.PASTE_HINT_S
 
@@ -1512,10 +1511,10 @@ async def test_a_send_trigger_with_nothing_pasted_is_ignored():
 
 async def test_a_send_trigger_into_the_wrong_window_keeps_the_paste_pending():
     class BlockedBridge(FakeBridge):
-        async def inject_keys(self, *keys):
+        async def inject_keys(self, *keys, explicit=False):
             if "Enter" in keys:
                 raise SubmitBlocked("Notes isn't Claude", "Notes isn't Claude")
-            await super().inject_keys(*keys)
+            await super().inject_keys(*keys, explicit=explicit)
 
     clock = Clock()
     d = await _typed(clock)

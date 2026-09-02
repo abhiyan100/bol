@@ -125,7 +125,7 @@ class SileroGate:
     A detector that starts raising mid-session hands the rest of the run to
     the energy gate rather than taking the microphone down with it. That
     fallback's noise floor starts empty, so it needs a few blocks to settle,
-    which is still better than a hands-free turn that never ends.
+    which is still better than a recording that never ends.
     """
 
     def __init__(self, detector, fallback) -> None:

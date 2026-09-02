@@ -97,11 +97,11 @@ DOTS = {
     "error": Dots("steady", color="red"),
 }
 
-# The hint after a paste that auto-send held back. It rides in on "sending"
-# with a hold of its own (see hold_for): "Sent" is one word that takes itself
-# down, and a line the user has to act on is neither. Dim blue rather than
-# white, so a pill that is waiting on the user never looks like one that is
-# finished.
+# The hint after a paste, which is after every paste: nothing is ever sent by
+# itself. It rides in on "sending" with a hold of its own (see hold_for):
+# "Sent" is one word that takes itself down, and a line the user has to act on
+# is neither. Dim blue rather than white, so a pill that is waiting on the
+# user never looks like one that is finished.
 PASTED = Dots("all", color="blue", alpha=0.60)
 
 # Transient states take themselves off the screen after this long, so the
@@ -122,7 +122,7 @@ DEFAULTS = {
     "error": "Something went wrong",
 }
 
-PERMISSION_HINT = "tap and say yes or no"
+PERMISSION_HINT = "say yes or no"
 SEPARATOR = " · "
 TRUNCATION = "..."
 # Hard ceiling on the label. The panel narrows it again to whatever 60% of

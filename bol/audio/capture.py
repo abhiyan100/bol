@@ -8,10 +8,9 @@ mints a token synchronously at the triggering event, and request_stop() on a
 token only ever ends *that* recording. A release for a session that never got
 the mic, or that already finished, is inert by construction: no cross-talk,
 no lost-stop races. The token also carries the mutable until_silence flag, so
-a tap can switch a running push-to-talk recording over to the speech gate,
-and end_reason, which records how the recording actually ended. That is the
-difference between "I am done" and "I paused", and the daemon spends it on
-whether to press Enter.
+a caller can hand a running recording over to the speech gate, and end_reason,
+which names how the recording actually ended: the daemon reads it to tell a
+recording the user abandoned from one that simply finished.
 
 The stream is prepared once and kept. Building an sd.InputStream costs about
 33 ms on an M-series Mac and start() another 10 to 25 ms, and both used to sit
@@ -63,14 +62,13 @@ _RING_MS = 2000
 
 # Every way a recording can end, as RecordingSession.end_reason.
 #   release: the held key came up.
-#   tap:     a second tap ended a recording the first tap started.
 #   silence: the speech gate endpointed after trailing silence.
 #   window:  the no-speech window passed with nobody speaking.
 #   max:     max_utterance_s (or its wall-clock backstop) ran out.
 #   cancelled: the user did something else instead (a click, another app).
 #   stop:    someone else stopped it: barge-in, shutdown, an unnamed caller.
-# The first two are the user saying "done"; the rest are Bol deciding.
-END_REASONS = ("release", "tap", "silence", "window", "max", "cancelled", "stop")
+# Only the first is the user saying "done"; the rest are Bol deciding.
+END_REASONS = ("release", "silence", "window", "max", "cancelled", "stop")
 
 # What a recording ended by a click or an app switch is called. Its audio is
 # dropped rather than transcribed: the user is looking at something else.
@@ -152,18 +150,18 @@ class RecordingSession:
     """Stop token for one recording. Mint via Recorder.begin() at the event
     that starts the recording (hotkey press / auto-listen decision).
 
-    until_silence is mutable and read every loop iteration: a tap sets it
-    after the recording is already running, which turns "record while held"
-    into "record until they stop talking" without restarting the mic.
+    until_silence is mutable and read every loop iteration, so a caller can
+    turn "record while held" into "record until they stop talking" without
+    restarting the mic.
 
     tap is optional and set before record(): a queue.Queue (thread-safe, since
     the audio callback fills it from PortAudio's thread) or any callable that
     takes one block. It sees every block this recording captures.
 
-    end_reason is how the recording finished, and the daemon reads it to
-    decide whether the words were finished too. Letting the key go or tapping
-    a second time is someone saying "done"; the silence gate ending an
-    utterance only means they paused, and people pause mid-sentence.
+    end_reason is how the recording finished. The daemon reads it to tell a
+    recording the user walked away from (cancelled: a click, another app)
+    from one that ended on its own terms, and it is the only record of that
+    once the audio is gone.
 
     silence_ms overrides [audio] silence_ms for this recording alone, and is
     how a "type" dictation gets its own, much longer pause: dictating a prompt
@@ -439,15 +437,15 @@ class Recorder:
         """Record one utterance; returns float32 mono @ sample_rate, or None.
 
         until_silence only ever turns the gate ON: the caller's argument and a
-        later tap both set the session flag, and the loop re-reads it every
-        block. With the gate off the recording returns everything captured;
-        only an empty recording (a tap released before the mic opened) gives
-        None. With it on, the recording gives the mic up if no speech starts
-        inside listen_window_s, endpoints after silence_ms, and discards
-        anything under min_speech_ms.
+        later write to the session flag both set it, and the loop re-reads it
+        every block. With the gate off the recording returns everything
+        captured; only an empty recording (the key released before the mic
+        opened) gives None. With it on, the recording gives the mic up if no
+        speech starts inside listen_window_s, endpoints after silence_ms, and
+        discards anything under min_speech_ms.
         """
         if session.stopped:
-            return None  # quick tap: released before the mic even opened
+            return None  # released before the mic even opened
         if until_silence:
             session.until_silence = True
         loop = asyncio.get_running_loop()
@@ -530,9 +528,9 @@ class Recorder:
             except asyncio.TimeoutError:
                 continue
             blocks.append(chunk)
-            # Asked for every block, gate in use or not, so a tap that flips
-            # until_silence mid-recording finds a gate already warmed on this
-            # room and this voice.
+            # Asked for every block, gate in use or not, so a caller that
+            # flips until_silence mid-recording finds a gate already warmed on
+            # this room and this voice.
             prob = gate.probability(chunk)
             if heard_speech:
                 # Continuing is easier than starting: one quiet block inside a

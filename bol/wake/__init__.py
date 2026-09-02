@@ -10,7 +10,8 @@ off and it still works.
 
 Four kinds of trigger word, and the daemon does something different with each:
 
-  WAKE   "hey bol"        a recording with the usual auto-send rules
+  WAKE   "hey bol"        a conversational recording, pasted like any other
+                          (there is a reply only with talk_back = true)
   TYPE   "type"           dictation: pasted after a pause, never submitted
   SEND   "send it"        Enter on what is already pasted; no recording
   CANCEL "scratch that"   wipe what is already pasted; no recording

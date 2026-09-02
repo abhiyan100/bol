@@ -1,10 +1,10 @@
 """bol CLI.
 
   bol                  same as `bol run`
-  bol run              start the voice daemon (hotkey + mic + talk-back)
-  bol talk             text mode, the same loop typed instead of spoken
+  bol run              start the voice daemon (hotkey + mic)
+  bol run --talk-back  ... and hear what Claude did
+  bol run --text       text mode, the same loop typed instead of spoken
   bol setup            first run: download models, install hooks, check permissions
-  bol launch [dir]     start claude inside tmux and attach to it
   bol hook install     add Bol's hooks to Claude Code settings (user scope)
   bol hook uninstall   remove them
   bol doctor           check environment, permissions, and wiring
@@ -31,7 +31,7 @@ from .config import (
     CONFIG_PATH,
     hook_token,
     load_config,
-    superseded_defaults,
+    removed_keys,
     write_default_config,
 )
 from .hooks import installer
@@ -80,7 +80,7 @@ def probe_system(cfg) -> list[tuple[str, str, str]]:
         (
             OK if machine == "arm64" else BAD,
             f"cpu: {machine}",
-            "Parakeet needs Apple Silicon; `bol talk` still works elsewhere",
+            "Parakeet needs Apple Silicon; `bol run --text` still works elsewhere",
         ),
         (
             OK if shutil.which("claude") else BAD,
@@ -541,8 +541,11 @@ def probe_weights(cfg) -> list[tuple[str, str, str]]:
     )
 
     if not hf_available():
-        return [(INFO, "models: cannot check (huggingface_hub not installed)", "")]
-    rows = []
+        return [
+            (INFO, mode_line(cfg), ""),
+            (INFO, "models: cannot check (huggingface_hub not installed)", ""),
+        ]
+    rows = [(INFO, mode_line(cfg), "")]
     for role, repo in wanted_models(cfg):
         if weights_cached(repo):
             size = human_bytes(weights_size_bytes(repo))
@@ -553,7 +556,9 @@ def probe_weights(cfg) -> list[tuple[str, str, str]]:
                 f"{role}: {repo} not downloaded ({size_hint(repo)})",
                 "run `bol setup` to fetch it now, or let first use pause for it",
             ))
-    return rows or [(INFO, "models: none needed by this config", "")]
+    if len(rows) == 1:
+        rows.append((INFO, "models: none needed by this config", ""))
+    return rows
 
 
 def wake_heard(cfg) -> str:
@@ -621,7 +626,7 @@ def probe_wake(cfg) -> list[tuple[str, str, str]]:
 
 
 def probe_injection(cfg) -> list[tuple[str, str, str]]:
-    return [probe_frontmost(cfg), probe_tmux(cfg)]
+    return [probe_frontmost(cfg)]
 
 
 def probe_frontmost(cfg) -> tuple[str, str, str]:
@@ -655,45 +660,37 @@ def probe_frontmost(cfg) -> tuple[str, str, str]:
     )
 
 
-def probe_tmux(cfg) -> tuple[str, str, str]:
-    if shutil.which("tmux") is None:
-        return (
-            INFO,
-            "tmux: not installed (focused mode pastes into your front terminal)",
-            "",
-        )
-
-    async def _panes():
-        from .bridge import TmuxBridge, TmuxError
-
-        try:
-            return await TmuxBridge().discover()
-        except TmuxError:
-            return []
-
-    try:
-        panes = asyncio.run(_panes())
-    except Exception:
-        panes = []
-    if panes:
-        listing = ", ".join(f"{p.pane_id} ({p.target})" for p in panes)
-        return (INFO, f"tmux: claude panes {listing}", "")
-    return (INFO, "tmux: no claude pane, focused mode will be used", "")
-
-
 # ---------------------------------------------------------------- model needs
 
 
+def mode_line(cfg) -> str:
+    """Which half of Bol this config selects, and what that costs."""
+    if cfg.talk_back:
+        return (
+            "mode: two-way (talk-back on). Bol speaks what Claude did, and "
+            '"hey Bol" starts a conversation.'
+        )
+    return (
+        "mode: one-way (dictation). No voice, no summarizer, no local LLM "
+        "server. Set talk_back = true, or run `bol run --talk-back`, to hear "
+        "what Claude did."
+    )
+
+
 def wanted_models(cfg) -> list[tuple[str, str]]:
-    """(role, repo id) for every model this config will actually load."""
+    """(role, repo id) for every model this config will actually load.
+
+    Talk-back is the expensive half: the summarizer and the voice are only
+    loaded, and only downloaded, when Bol is going to say something.
+    """
     models = []
     if cfg.stt.engine == "parakeet":
         models.append(("speech to text", cfg.stt.parakeet_model))
-    if cfg.llm.provider == "local":
+    if cfg.talk_back and cfg.llm.provider == "local":
         models.append(("summaries", cfg.llm.local_model))
     if cfg.cleanup.model and cfg.cleanup.mode != "off":
         models.append(("cleanup", cfg.cleanup.model))
-    if cfg.tts.engine == "kokoro":
+    if cfg.talk_back and cfg.tts.engine == "kokoro":
         models.append(("voice", cfg.tts.kokoro_model))
     return models
 
@@ -732,8 +729,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             pass
 
     cfg = load_config()
+    # The flag is for one session, so it wins over the file both ways:
+    # --talk-back to hear this run, --no-talk-back to keep it quiet.
+    if getattr(args, "talk_back", None) is not None:
+        cfg.talk_back = args.talk_back
     _quiet_model_libraries(cfg)
-    for hint in superseded_defaults(cfg):
+    for hint in removed_keys():
         print(f"bol: {hint}")
     if not installer.installed(_url(cfg)):
         print("bol: hooks not installed, running `bol hook install` for you.")
@@ -830,23 +831,6 @@ def _warn_missing_weights(cfg) -> None:
         )
 
 
-def cmd_talk(args: argparse.Namespace) -> int:
-    args.text = True
-    return cmd_run(args)
-
-
-def cmd_launch(args: argparse.Namespace) -> int:
-    from .bridge import TmuxBridge
-
-    async def _launch():
-        pane = await TmuxBridge.launch(session=args.session, cwd=args.dir)
-        print(f"bol: claude running in tmux session '{args.session}' (pane {pane.pane_id})")
-        print(f"bol: attach with: tmux attach -t {args.session}")
-
-    asyncio.run(_launch())
-    return 0
-
-
 def cmd_hook(args: argparse.Namespace) -> int:
     cfg = load_config()
     url = _url(cfg)
@@ -875,8 +859,10 @@ def cmd_setup(_args: argparse.Namespace) -> int:
     existed = CONFIG_PATH.exists()
     path = write_default_config()
     print(f"config: {'already at' if existed else 'written to'} {path}")
-    for hint in superseded_defaults(cfg):
+    for hint in removed_keys():
         print(f"  note: {hint}")
+    print()
+    print(mode_line(cfg))
     print()
 
     ok = _setup_models(cfg)
@@ -893,11 +879,11 @@ def cmd_setup(_args: argparse.Namespace) -> int:
     ok = _print_rows(rows) and ok
 
     if ok:
-        print("\nsetup done. Next: run `bol run`, then tap or hold right Option and talk.")
+        print("\nsetup done. Next: run `bol run`, then hold right Option and talk.")
     else:
         print(
             "\nsetup done, but fix the [!!] lines above first. "
-            "Then run `bol run` and tap or hold right Option to talk."
+            "Then run `bol run` and hold right Option to talk."
         )
     return 0 if ok else 1
 
@@ -1066,20 +1052,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="start the voice daemon (the default)")
     p_run.add_argument("--text", action="store_true", help="text mode (no mic)")
+    p_run.add_argument(
+        "--talk-back",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="hear what Claude did (default: talk_back in your config, off)",
+    )
     p_run.set_defaults(func=cmd_run)
-
-    p_talk = sub.add_parser("talk", help="text mode: typed loop, no mic")
-    p_talk.set_defaults(func=cmd_talk)
 
     p_setup = sub.add_parser(
         "setup", help="download models, install hooks, check permissions"
     )
     p_setup.set_defaults(func=cmd_setup)
-
-    p_launch = sub.add_parser("launch", help="start claude in tmux")
-    p_launch.add_argument("dir", nargs="?", default=os.getcwd())
-    p_launch.add_argument("--session", default="bol")
-    p_launch.set_defaults(func=cmd_launch)
 
     p_hook = sub.add_parser("hook", help="manage Claude Code hooks")
     p_hook.add_argument("hook_cmd", choices=["install", "uninstall"])

@@ -11,30 +11,25 @@ from bol.config import (
     DEFAULT_CONFIG_TOML,
     Config,
     load_config,
+    removed_keys,
     validate_config,
 )
 
 
-def test_v03_defaults():
+def test_the_defaults():
     cfg = Config()
-    assert cfg.hotkey.mode == "auto"
-    assert cfg.hotkey.tap_ms == 400
-    assert cfg.hotkey.submit == "auto"
-    assert cfg.hotkey.auto_send_min_words == 3
+    assert cfg.hotkey.key == "alt_r"
     assert cfg.audio.pre_roll_ms == 300
     assert cfg.audio.warm_s == 120
-    # Reopening the mic unasked would send room noise now that dictation
-    # submits itself.
-    assert cfg.hands_free is False
+    # One-way unless asked: nothing is spoken, and no summarizer, voice or
+    # LLM server is loaded.
+    assert cfg.talk_back is False
 
 
 def test_the_default_file_parses():
     data = tomllib.loads(DEFAULT_CONFIG_TOML)
-    assert data["hands_free"] is False
-    assert data["hotkey"]["mode"] == "auto"
-    assert data["hotkey"]["tap_ms"] == 400
-    assert data["hotkey"]["submit"] == "auto"
-    assert data["hotkey"]["auto_send_min_words"] == 3
+    assert data["talk_back"] is False
+    assert data["hotkey"]["key"] == "alt_r"
     assert data["audio"]["pre_roll_ms"] == 300
     assert data["audio"]["warm_s"] == 120
 
@@ -42,7 +37,7 @@ def test_the_default_file_parses():
 def test_the_default_file_matches_the_dataclasses():
     data = tomllib.loads(DEFAULT_CONFIG_TOML)
     cfg = Config()
-    assert data["hands_free"] == cfg.hands_free
+    assert data["talk_back"] == cfg.talk_back
     for key, value in data["hotkey"].items():
         assert getattr(cfg.hotkey, key) == value, key
     for key, value in data["audio"].items():
@@ -53,22 +48,26 @@ def test_the_default_file_matches_the_dataclasses():
         assert getattr(cfg.stt, key) == value, key
 
 
+def test_the_default_file_has_no_key_the_dataclasses_dropped(tmp_path):
+    # The file is the documentation. A key nobody reads any more sitting in
+    # it is how people end up configuring something that does nothing.
+    path = tmp_path / "config.toml"
+    path.write_text(DEFAULT_CONFIG_TOML)
+    assert removed_keys(path) == []
+
+
 def test_load_config_applies_the_new_fields(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
-        "hands_free = true\n"
-        '[hotkey]\nmode = "push_to_talk"\ntap_ms = 250\nsubmit = "voice"\n'
-        "auto_send_min_words = 5\n"
+        "talk_back = true\n"
+        '[hotkey]\nkey = "f13"\n'
         "[audio]\npre_roll_ms = 500\nwarm_s = 30\n"
     )
 
     cfg = load_config(path)
 
-    assert cfg.hands_free is True
-    assert cfg.hotkey.mode == "push_to_talk"
-    assert cfg.hotkey.tap_ms == 250
-    assert cfg.hotkey.submit == "voice"
-    assert cfg.hotkey.auto_send_min_words == 5
+    assert cfg.talk_back is True
+    assert cfg.hotkey.key == "f13"
     assert cfg.audio.pre_roll_ms == 500
     assert cfg.audio.warm_s == 30
 
@@ -80,31 +79,20 @@ def test_ui_defaults():
     assert cfg.ui.position == "top"
 
 
-def test_sound_cues_still_reads_and_writes_the_new_home():
-    # Old code (and old muscle memory) says cfg.sound_cues; it has to keep
-    # meaning exactly what [ui] sounds means.
-    cfg = Config()
-    assert cfg.sound_cues is True
-    cfg.sound_cues = False
-    assert cfg.ui.sounds is False
-    cfg.ui.sounds = True
-    assert cfg.sound_cues is True
-
-
-def test_an_old_config_file_keeps_working(tmp_path):
+def test_an_old_config_file_still_loads(tmp_path):
+    # Keys this Bol no longer reads are ignored, not fatal: an old file has
+    # to keep starting Bol, and removed_keys() is what says what changed.
     path = tmp_path / "config.toml"
-    path.write_text("sound_cues = false\n")
-    cfg = load_config(path)
-    assert cfg.ui.sounds is False
-    assert cfg.sound_cues is False
+    path.write_text(
+        "sound_cues = false\nhands_free = true\n"
+        '[hotkey]\nmode = "auto"\nsubmit = "always"\n[ui]\npill = false\n'
+    )
 
-
-def test_the_ui_section_wins_over_the_old_alias(tmp_path):
-    path = tmp_path / "config.toml"
-    path.write_text('sound_cues = false\n[ui]\nsounds = true\npill = false\n')
     cfg = load_config(path)
-    assert cfg.ui.sounds is True
+
+    assert cfg.ui.sounds is True   # the old alias decides nothing now
     assert cfg.ui.pill is False
+    validate_config(cfg)
 
 
 def test_load_config_reads_the_ui_section(tmp_path):
@@ -117,60 +105,25 @@ def test_load_config_reads_the_ui_section(tmp_path):
 
 def test_load_config_without_a_file_is_all_defaults(tmp_path):
     cfg = load_config(tmp_path / "missing.toml")
-    assert cfg.hotkey.mode == "auto"
-    assert cfg.hotkey.submit == "auto"
+    assert cfg.hotkey.key == "alt_r"
+    assert cfg.talk_back is False
 
 
 # ------------------------------------------------------------------ validation
 
 
-def test_validate_accepts_every_documented_mode():
-    for mode in ("auto", "push_to_talk", "toggle"):
-        cfg = Config()
-        cfg.hotkey.mode = mode
-        validate_config(cfg)
-    for submit in ("auto", "always", "voice"):
-        cfg = Config()
-        cfg.hotkey.submit = submit
-        validate_config(cfg)
-
-
-def test_validate_rejects_an_unknown_mode():
+def test_validate_rejects_a_quoted_talk_back():
+    # A non-empty string is truthy, so talk_back = "false" would load a
+    # summarizer, a voice and an LLM server for someone who said not to.
     cfg = Config()
-    cfg.hotkey.mode = "hold_to_talk"
+    cfg.talk_back = "false"
 
     with pytest.raises(ValueError) as err:
         validate_config(cfg)
 
     message = str(err.value)
-    assert "hold_to_talk" in message
-    assert "auto" in message and "push_to_talk" in message and "toggle" in message
-
-
-def test_validate_rejects_an_unknown_submit():
-    cfg = Config()
-    cfg.hotkey.submit = "sometimes"
-
-    with pytest.raises(ValueError) as err:
-        validate_config(cfg)
-
-    message = str(err.value)
-    assert "sometimes" in message
-    # All three, so the fix is in the error and not in the docs.
-    assert "auto" in message and "always" in message and "voice" in message
-
-
-def test_always_is_a_documented_submit_mode(tmp_path):
-    # The pre-0.5 behavior, kept for anyone whose hands-free flow relied on a
-    # pause sending the turn.
-    from bol.config import SUBMIT_MODES
-
-    assert SUBMIT_MODES == ("auto", "always", "voice")
-    path = tmp_path / "config.toml"
-    path.write_text('[hotkey]\nsubmit = "always"\n')
-    cfg = load_config(path)
-    assert cfg.hotkey.submit == "always"
-    validate_config(cfg)
+    assert "talk_back" in message
+    assert "true or false" in message
 
 
 def test_validate_rejects_an_unknown_pill_position():
@@ -187,11 +140,11 @@ def test_validate_rejects_an_unknown_pill_position():
 
 def test_the_daemon_validates_at_startup():
     # cmd_run prints a ValueError cleanly, so a typo costs one line instead of
-    # a hotkey that silently never fires.
+    # a setting that silently means the opposite of what it says.
     from bol.daemon import Daemon
 
     cfg = Config()
-    cfg.hotkey.mode = "typo"
+    cfg.ui.position = "typo"
     with pytest.raises(ValueError):
         Daemon(cfg, text_mode=True)
 
@@ -271,15 +224,74 @@ def test_two_configs_do_not_share_a_vocabulary_list():
     assert second.vocabulary.words == []
 
 
-def test_superseded_defaults_flags_the_old_hotkey_mode():
-    from bol.config import Config, superseded_defaults
+# ------------------------------------------------- keys that no longer exist
 
-    cfg = Config()
-    assert superseded_defaults(cfg) == []
-    cfg.hotkey.mode = "push_to_talk"
-    (hint,) = superseded_defaults(cfg)
-    assert 'mode = "auto"' in hint
-    assert "push_to_talk" in hint
+
+def _hint(tmp_path, text):
+    path = tmp_path / "config.toml"
+    path.write_text(text)
+    hints = removed_keys(path)
+    assert len(hints) == 1, hints
+    return hints[0]
+
+
+def test_the_old_hotkey_mode_gets_one_line(tmp_path):
+    hint = _hint(tmp_path, '[hotkey]\nmode = "auto"\n')
+    assert "[hotkey] mode" in hint
+    assert "hold the key" in hint
+
+
+def test_the_old_submit_setting_gets_one_line(tmp_path):
+    hint = _hint(tmp_path, '[hotkey]\nsubmit = "always"\n')
+    assert "[hotkey] submit" in hint
+    assert "send it" in hint
+
+
+def test_hands_free_gets_one_line(tmp_path):
+    hint = _hint(tmp_path, "hands_free = true\n")
+    assert "hands_free" in hint
+    assert "awake" in hint
+
+
+def test_the_old_bridge_mode_gets_one_line(tmp_path):
+    hint = _hint(tmp_path, '[bridge]\nmode = "tmux"\n')
+    assert "[bridge] mode" in hint
+
+
+def test_sound_cues_gets_one_line(tmp_path):
+    hint = _hint(tmp_path, "sound_cues = false\n")
+    assert "sound_cues" in hint
+    assert "[ui] sounds" in hint
+
+
+def test_a_current_config_says_nothing(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('talk_back = true\n[hotkey]\nkey = "alt_r"\n[ui]\nsounds = false\n')
+    assert removed_keys(path) == []
+
+
+def test_every_removed_key_is_named_once(tmp_path):
+    # One line per key that is actually in the file, and the path with it, so
+    # the reader knows which config is being talked about.
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "hands_free = true\nsound_cues = false\n"
+        '[hotkey]\nmode = "auto"\ntap_ms = 400\nsubmit = "auto"\n'
+        "auto_send_min_words = 3\n"
+        '[bridge]\nmode = "auto"\npane = "%3"\n'
+    )
+
+    hints = removed_keys(path)
+
+    assert len(hints) == 8
+    assert all(str(path) in hint for hint in hints)
+
+
+def test_a_missing_or_broken_config_is_not_a_crash(tmp_path):
+    assert removed_keys(tmp_path / "missing.toml") == []
+    broken = tmp_path / "config.toml"
+    broken.write_text("[hotkey\nmode = ")
+    assert removed_keys(broken) == []
 
 
 # ------------------------------------------------------- where Bol may paste
@@ -296,6 +308,16 @@ def test_anywhere_is_in_the_default_file_and_agrees_with_the_dataclass():
     for key, value in data["bridge"].items():
         assert getattr(cfg.bridge, key) == value, key
     assert data["bridge"]["anywhere"] is True
+
+
+def test_talk_back_is_the_one_switch_between_the_two_modes(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("talk_back = true\n")
+
+    cfg = load_config(path)
+
+    assert cfg.talk_back is True
+    validate_config(cfg)
 
 
 def test_terminal_only_is_one_line(tmp_path):

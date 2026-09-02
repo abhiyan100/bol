@@ -58,6 +58,9 @@ def fake_daemon(monkeypatch):
     monkeypatch.setattr(cli, "_url", lambda cfg: "http://127.0.0.1:8770/hook?token=t")
     monkeypatch.setattr(cli.installer, "installed", lambda *a, **k: True)
     monkeypatch.setattr(cli, "_warn_missing_weights", lambda cfg: None)
+    # The real config on this machine is nobody's business here, and its
+    # hints would drown the one line these tests are about.
+    monkeypatch.setattr(cli, "removed_keys", lambda *a, **k: [])
     return install
 
 
@@ -141,11 +144,102 @@ def test_run_says_bye_on_ctrl_c(fake_daemon, capsys):
 
 def test_wanted_models_follows_the_config():
     cfg = Config()
+    cfg.talk_back = True
     cfg.stt.engine = "none"
     cfg.llm.provider = "off"
     cfg.cleanup.mode = "off"
     cfg.tts.engine = "kokoro"
     assert cli.wanted_models(cfg) == [("voice", cfg.tts.kokoro_model)]
+
+
+# ------------------------------------------------------- one-way and two-way
+
+
+def test_one_way_downloads_neither_the_summarizer_nor_the_voice():
+    # The point of the default: `bol setup` on a 16 GB Mac fetches speech and
+    # cleanup, and nothing that exists only to talk back.
+    cfg = Config()
+    cfg.tts.engine = "kokoro"
+
+    roles = [role for role, _repo in cli.wanted_models(cfg)]
+
+    assert roles == ["speech to text", "cleanup"]
+
+
+def test_two_way_adds_the_summaries_model_and_the_voice():
+    cfg = Config()
+    cfg.talk_back = True
+    cfg.tts.engine = "kokoro"
+
+    models = cli.wanted_models(cfg)
+
+    assert [role for role, _repo in models] == [
+        "speech to text", "summaries", "cleanup", "voice",
+    ]
+    assert ("summaries", cfg.llm.local_model) in models
+
+
+def test_setup_and_doctor_say_which_mode_the_config_selects():
+    cfg = Config()
+    one_way = cli.mode_line(cfg)
+    assert "one-way" in one_way
+    assert "--talk-back" in one_way
+
+    cfg.talk_back = True
+    two_way = cli.mode_line(cfg)
+    assert "two-way" in two_way
+
+    # And doctor's model section leads with it, so the list underneath is
+    # read as "what this mode needs" and not "what Bol has".
+    rows = cli.probe_weights(cfg)
+    assert rows[0] == (cli.INFO, two_way, "")
+
+
+def test_the_talk_back_flag_wins_over_the_config(fake_daemon, monkeypatch):
+    seen = {}
+
+    class Daemon:
+        def __init__(self, cfg, text_mode=False):
+            seen["talk_back"] = cfg.talk_back
+
+        async def run(self):
+            pass
+
+    module = types.ModuleType("bol.daemon")
+    module.Daemon = Daemon
+    monkeypatch.setitem(sys.modules, "bol.daemon", module)
+    # The file says one thing ...
+    cfg = Config()
+    cfg.talk_back = False
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+
+    assert cli.main(["run", "--text", "--talk-back"]) == 0
+    assert seen["talk_back"] is True  # ... the flag says the other
+
+    cfg.talk_back = True
+    assert cli.main(["run", "--text", "--no-talk-back"]) == 0
+    assert seen["talk_back"] is False  # and it wins both ways
+
+
+def test_without_the_flag_the_config_decides(fake_daemon, monkeypatch):
+    seen = {}
+
+    class Daemon:
+        def __init__(self, cfg, text_mode=False):
+            seen["talk_back"] = cfg.talk_back
+
+        async def run(self):
+            pass
+
+    module = types.ModuleType("bol.daemon")
+    module.Daemon = Daemon
+    monkeypatch.setitem(sys.modules, "bol.daemon", module)
+    cfg = Config()
+    cfg.talk_back = True
+    monkeypatch.setattr(cli, "load_config", lambda *a, **k: cfg)
+
+    assert cli.main(["run", "--text"]) == 0
+    assert seen["talk_back"] is True
 
 
 def test_quiet_model_libraries_goes_offline_when_everything_is_cached(monkeypatch):

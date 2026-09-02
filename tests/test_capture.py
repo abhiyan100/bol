@@ -178,7 +178,7 @@ async def test_push_to_talk_converts_int16_frames(monkeypatch):
     assert np.max(np.abs(audio)) <= 1.0
 
 
-async def test_tap_released_before_the_mic_opens(monkeypatch):
+async def test_a_key_released_before_the_mic_opens(monkeypatch):
     recorder = Recorder(_cfg())
     session = recorder.begin()
     opened = _fake_sd(monkeypatch, _speech(10))
@@ -396,16 +396,16 @@ async def test_a_dead_stream_is_dropped_and_rebuilt(monkeypatch):
 async def test_until_silence_set_mid_recording_endpoints_the_utterance(
     monkeypatch,
 ):
-    # The tap: the recording starts as push-to-talk, and the key release a
-    # moment later hands the ending over to the energy gate. Levels are
-    # measured from the first block, so the floor is ready when the flag flips.
+    # A recording that starts as push-to-talk and is handed over to the
+    # energy gate mid-flight. Levels are measured from the first block, so the
+    # floor is ready when the flag flips.
     recorder = Recorder(_cfg())
     session = recorder.begin()
     opened = _fake_sd(monkeypatch, _silence(4) + _speech(8))
 
     async def release():
         await asyncio.sleep(0.03)
-        session.until_silence = True   # the tap
+        session.until_silence = True   # handed to the gate
         opened[0].feed(_silence(10))   # and then the speaker stops talking
 
     asyncio.get_running_loop().create_task(release())
@@ -690,9 +690,9 @@ async def test_a_monitor_that_raises_never_costs_the_recording(monkeypatch):
 
 # ----------------------------------------------------------- how it ended
 
-# end_reason is the difference between "I am done" and "I paused", and the
-# daemon spends it on whether to press Enter. Every path that ends a
-# recording has to name itself, or a pause reads as a finished sentence.
+# end_reason is how a recording finished, and the daemon spends it on whether
+# the user walked away from it. Every path that ends a recording has to name
+# itself, or a cancelled one reads like a finished sentence.
 
 
 async def test_a_release_names_its_ending(monkeypatch):
@@ -704,17 +704,6 @@ async def test_a_release_names_its_ending(monkeypatch):
 
     assert audio is not None
     assert session.end_reason == "release"
-
-
-async def test_a_second_tap_names_its_ending(monkeypatch):
-    recorder = Recorder(_cfg())
-    session = recorder.begin()
-    _fake_sd(monkeypatch, _speech(6), on_exhausted=lambda: session.request_stop("tap"))
-
-    audio = await _record(recorder, session, until_silence=False)
-
-    assert audio is not None
-    assert session.end_reason == "tap"
 
 
 async def test_an_unnamed_stop_is_just_stop(monkeypatch):
@@ -834,7 +823,7 @@ async def test_every_reason_is_documented():
     # The daemon reads these names; a new one nobody wrote down is a rule
     # nobody applied.
     assert set(capture.END_REASONS) == {
-        "release", "tap", "silence", "window", "max", "cancelled", "stop",
+        "release", "silence", "window", "max", "cancelled", "stop",
     }
     assert capture.CANCELLED in capture.END_REASONS
 

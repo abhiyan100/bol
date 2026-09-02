@@ -6,23 +6,17 @@ still starts cleanly and simply never delivers a key, so start() checks
 IS_TRUSTED and raises PermissionError with the fix rather than leaving a
 hotkey that looks armed and is dead.
 
-auto:         key down starts recording. A release under tap_ms was a tap, so
-              on_release("tap") fires and the recording carries on until the
-              speaker stops talking; a longer release was a hold, so
-              on_release("hold") ends it. While a tap-started recording runs,
-              the next press starts nothing and its release ends that
-              recording instead. The daemon calls clear_tap() when the
-              recording is over, so a turn that ended on its own can never
-              swallow the next press.
-push_to_talk: key down calls on_press, key up calls on_release("hold").
-toggle:       each tap alternates on_press / on_release("hold").
+Hold to talk, and nothing else: key down calls on_press, key up calls
+on_release, and the recording lasts exactly as long as the key is held. There
+are no modes and no tap: a tap is a hold that was over quickly, which is a
+recording with nothing in it, and everything a tap used to do is a trigger
+word now ("type", "send it", "scratch that").
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from time import monotonic
 from typing import Callable
 
 from pynput import keyboard
@@ -33,10 +27,6 @@ log = logging.getLogger("bol.hotkey")
 
 # Enough of the pynput vocabulary to fix a typo without opening its docs.
 _KEY_EXAMPLES = "alt_r, alt_l, cmd_r, ctrl_r, shift_r, f13"
-
-# Indirection so tests can drive the tap/hold decision with a fake clock
-# instead of patching time.monotonic out from under asyncio.
-_monotonic = monotonic
 
 NOT_TRUSTED = (
     "Input Monitoring is off, so the hotkey can't fire. "
@@ -66,71 +56,31 @@ class HotkeyListener:
         self,
         cfg: HotkeyConfig,
         on_press: Callable[[], None],
-        on_release: Callable[[str], None],
+        on_release: Callable[[], None],
     ) -> None:
         self._cfg = cfg
         self._key = _resolve(cfg.key)
         self._on_press = on_press
         self._on_release = on_release
         self._loop = asyncio.get_event_loop()
+        # Key repeat fires press over and over while the key is held; one
+        # press per hold is the whole contract.
         self._down = False
-        self._down_at = 0.0
-        self._toggled = False
-        # auto mode: a tap-started recording is still running.
-        self._tap_active = False
-        # auto mode: this press was spent ending that recording, so its
-        # release must not be read as a fresh tap.
-        self._consumed = False
         self._listener: keyboard.Listener | None = None
-
-    def clear_tap(self) -> None:
-        """The tap-started recording is over (it endpointed on silence, or
-        failed). Called by the daemon so the next press starts a new one."""
-        self._tap_active = False
-
-    def _fire_release(self, kind: str) -> None:
-        self._loop.call_soon_threadsafe(self._on_release, kind)
 
     def _handle_press(self, key) -> None:
         if key != self._key or self._down:
             return
         self._down = True
-        self._down_at = _monotonic()
-        if self._cfg.mode == "toggle":
-            self._toggled = not self._toggled
-            if self._toggled:
-                self._loop.call_soon_threadsafe(self._on_press)
-            else:
-                self._fire_release("hold")
-            return
-        if self._cfg.mode == "auto" and self._tap_active:
-            # Second tap on a running recording: this press ends it rather
-            # than starting another, so on_press is deliberately skipped.
-            self._consumed = True
-            return
-        self._consumed = False
         self._loop.call_soon_threadsafe(self._on_press)
 
     def _handle_release(self, key) -> None:
         if key != self._key:
             return
-        held_ms = (_monotonic() - self._down_at) * 1000
         self._down = False
-        if self._cfg.mode == "push_to_talk":
-            self._fire_release("hold")
-            return
-        if self._cfg.mode != "auto":
-            return  # toggle acts on the press
-        if self._consumed:
-            self._consumed = False
-            self._tap_active = False
-            self._fire_release("tap")
-            return
-        if held_ms < self._cfg.tap_ms:
-            self._tap_active = True
-            self._fire_release("tap")
-        else:
-            self._fire_release("hold")
+        # Fired even for a release nobody pressed for (Bol started with the
+        # key already down): the daemon's release is inert without a session.
+        self._loop.call_soon_threadsafe(self._on_release)
 
     def start(self) -> None:
         listener = keyboard.Listener(
@@ -145,7 +95,7 @@ class HotkeyListener:
             listener.stop()
             raise PermissionError(NOT_TRUSTED)
         self._listener = listener
-        log.info("hotkey armed: %s (%s)", self._cfg.key, self._cfg.mode)
+        log.info("hotkey armed: hold %s", self._cfg.key)
 
     def stop(self) -> None:
         if self._listener:

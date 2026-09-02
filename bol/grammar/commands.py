@@ -7,8 +7,8 @@ classifier. A short fuzzy match against the last few words decides what to do
   "refactor the auth module send it"  -> SEND  text="refactor the auth module"
   "type hello world"                  -> TYPE  text="hello world"   (no Enter)
   "scratch that" / "close" / "cancel" -> DISCARD
-  "stop listening"                    -> SLEEP  (disables hands-free loop)
-  "interrupt" / "stop claude"         -> INTERRUPT (Escape to the pane)
+  "stop listening"                    -> SLEEP  (pauses the ear until the key)
+  "interrupt" / "stop claude"         -> INTERRUPT (Escape to Claude)
   anything else                       -> DICTATE (buffered; "send it" submits)
 """
 
@@ -24,7 +24,7 @@ class Action(Enum):
     TYPE = auto()       # inject text without Enter
     DICTATE = auto()    # plain speech, buffer it
     DISCARD = auto()    # throw away the current buffer
-    SLEEP = auto()      # stop hands-free listening
+    SLEEP = auto()      # stop listening until the key comes back
     INTERRUPT = auto()  # send Escape to Claude
     REPEAT = auto()     # re-speak the last reply
 

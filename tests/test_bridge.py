@@ -1,7 +1,6 @@
 import pytest
 
-from bol.bridge import BridgeError, FocusedBridge, TmuxBridge, TmuxError, build_bridge
-from bol.bridge.base import AutoBridge
+from bol.bridge import BridgeError, FocusedBridge, build_bridge
 from bol.bridge.focused import SubmitBlocked, frontmost_bundle_id
 from bol.config import Config
 
@@ -9,12 +8,6 @@ TERMINAL = "com.apple.Terminal"
 CURSOR = "com.todesktop.230313mzl4w4u92"
 SLACK = "com.tinyspeck.slackmacgap"
 NOTES = "com.apple.Notes"
-
-
-def _cfg(mode):
-    cfg = Config()
-    cfg.bridge.mode = mode
-    return cfg
 
 
 def _wire(monkeypatch, front, title=None, tree=None, anywhere=True, allowed=None):
@@ -63,14 +56,10 @@ def _entered(calls):
     return any("key code 36" in s for s in _scripts(calls))
 
 
-def test_factory_modes():
-    assert isinstance(build_bridge(_cfg("tmux")), TmuxBridge)
-    assert isinstance(build_bridge(_cfg("focused")), FocusedBridge)
-    assert isinstance(build_bridge(_cfg("auto")), AutoBridge)
-
-
-def test_tmux_error_is_bridge_error():
-    assert issubclass(TmuxError, BridgeError)
+def test_the_factory_builds_the_one_bridge_there_is():
+    # tmux injection lived in v0.4 and earlier; typing into the front app made
+    # it redundant, so there is nothing left to choose between.
+    assert isinstance(build_bridge(Config()), FocusedBridge)
 
 
 @pytest.mark.asyncio
@@ -515,40 +504,11 @@ async def test_interrupt_is_explicit_so_it_goes_anywhere(monkeypatch):
     assert any("key code 53" in s for s in _keystrokes(calls))
 
 
-# --- who is told about explicit ----------------------------------------------
-
-
-def test_only_a_bridge_with_an_app_guard_is_handed_the_flag():
-    from bol.bridge import explicit_kw
-
-    assert explicit_kw(FocusedBridge(None, 0.0), True) == {"explicit": True}
-    assert explicit_kw(FocusedBridge(None, 0.0), False) == {"explicit": False}
-    # tmux injects into a pinned Claude pane and was left exactly as it was.
-    assert explicit_kw(TmuxBridge(), True) == {}
+# --- what the config reaches -------------------------------------------------
 
 
 def test_anywhere_reaches_the_focused_bridge_from_config():
-    cfg = _cfg("focused")
+    cfg = Config()
     cfg.bridge.anywhere = False
     assert build_bridge(cfg)._anywhere is False
-    assert build_bridge(_cfg("focused"))._anywhere is True
-
-
-@pytest.mark.asyncio
-async def test_auto_bridge_forwards_the_flag_only_to_the_focused_bridge():
-    """Auto mode lands on either bridge, so it asks before forwarding."""
-    sent = []
-
-    async def record(*keys, **kw):
-        sent.append((keys, kw))
-
-    auto = AutoBridge(_cfg("auto"))
-    auto._inner = TmuxBridge()
-    auto._inner.inject_keys = record
-    await auto.inject_keys("Enter", explicit=True)
-    assert sent == [(("Enter",), {})]  # tmux takes no flag and never gets one
-
-    auto._inner = FocusedBridge(None, 0.0)
-    auto._inner.inject_keys = record
-    await auto.inject_keys("Enter", explicit=True)
-    assert sent[-1] == (("Enter",), {"explicit": True})
+    assert build_bridge(Config())._anywhere is True

@@ -14,11 +14,11 @@ with [bridge] anywhere = true (the default) dictation lands wherever the
 cursor is, Notes and Slack included, while Enter still has to be earned:
   - an explicit Enter is the user's own words ("send it", "go ahead") and goes
     wherever they are looking;
-  - an automatic Enter is Bol's own guess that an utterance was a finished
-    instruction, and is withheld unless the front app is an allowlisted
-    terminal or IDE AND is positively identified as a Claude Code session
-    (see _submit_allowed) -- a stray Enter in a plain shell executes the
-    pasted speech.
+  - any other Enter is Bol's own doing, and is withheld unless the front app
+    is an allowlisted terminal or IDE AND is positively identified as a
+    Claude Code session (see _submit_allowed) -- a stray Enter in a plain
+    shell executes the pasted speech. Nothing in Bol presses Enter by itself
+    any more, so this gate is the backstop, not the daily path.
 anywhere = false puts the allowlist back in front of everything, pastes and
 keys alike, which is what Bol did before.
 
@@ -141,11 +141,9 @@ class SubmitBlocked(BridgeError):
 
 
 class FocusedBridge:
-    # This is the bridge with an app to be wrong about, so this is the one the
-    # daemon tells whether an Enter was asked for in words. The tmux bridge
-    # injects into a pinned Claude pane and takes no such flag; see
-    # bol/bridge/base.py explicit_kw.
-    explicit_aware = True
+    # Every keystroke arrives with explicit=: True when the user asked for it
+    # in words, False when it is Bol's own doing. The gate below is the whole
+    # reason the daemon says which.
 
     def __init__(
         self,
@@ -330,8 +328,8 @@ class FocusedBridge:
     async def inject(self, text: str, submit: bool, *, explicit: bool = False) -> None:
         """Paste text, and optionally press Enter after it.
 
-        explicit says the Enter came from the user's words rather than from
-        Bol's auto-send rule. The paste is guarded as a paste either way, so a
+        explicit says the Enter came from the user's own words rather than
+        from Bol. The paste is guarded as a paste either way, so a
         withheld Enter still leaves the words in the box for a later
         "send it" -- that is what SubmitBlocked means to the daemon."""
         front = await self._guard(anywhere_ok=True)
