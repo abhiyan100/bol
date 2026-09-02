@@ -4,9 +4,12 @@ hotkey/auto-listen → record → transcribe → parse command → tmux inject
         ↑                                                        ↓
    TTS "what next?"  ← persona summary ← Stop hook ← Claude runs turn
 
-Dictated text is injected into Claude's input box immediately (no Enter), so
-the user watches it appear in the TUI exactly like typing. "send it" presses
-Enter. The Stop hook closes the loop by speaking what happened.
+Dictated text is injected into Claude's input box immediately, so the user
+watches it appear in the TUI exactly like typing. With [hotkey] submit =
+"auto" a dictated instruction of a few words or more presses Enter for itself;
+shorter text, a "type ..." prefix, and submit = "voice" all paste without it,
+and "send it" always submits. The Stop hook closes the loop by speaking what
+happened.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from .audio import Recorder
 from .bridge import BridgeError, build_bridge
 from .bridge.focused import SubmitBlocked
 from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
-from .config import Config, hook_token
+from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker
 from .hotkey import HotkeyListener
@@ -47,6 +50,9 @@ def _drain(task: asyncio.Task) -> None:
 
 class Daemon:
     def __init__(self, cfg: Config, text_mode: bool = False) -> None:
+        # Fail here, with the list of valid values, rather than arming a
+        # hotkey whose mode nothing in the listener recognises.
+        validate_config(cfg)
         self.cfg = cfg
         self.text_mode = text_mode
         self.bridge = build_bridge(cfg)
@@ -74,6 +80,8 @@ class Daemon:
         self._active_session = None
         self._active_hands_free = False
         self._ptt_session = None
+        # The recording a tap started and left running; the next tap ends it.
+        self._tap_session = None
         self._asleep = False
         self._last_reply = ""
         # Claude Code hooks are user-scoped, so every session on this machine
@@ -115,16 +123,28 @@ class Daemon:
             await self._text_console()
             return
 
+        # Build the input stream before the key is armed: construction is the
+        # expensive half of opening a mic and it must not land on the press.
+        try:
+            await self.recorder.open()
+        except Exception as exc:
+            log.warning("could not prepare the microphone: %s", exc)
+
         self.hotkey = HotkeyListener(
             self.cfg.hotkey, self._hotkey_pressed, self._hotkey_released
         )
         self.hotkey.start()
-        mode = self.cfg.hotkey.mode.replace("_", "-")
-        print(f"bol: hold {self.cfg.hotkey.key} to talk ({mode}). Ctrl+C to quit.")
+        key = self.cfg.hotkey.key
+        if self.cfg.hotkey.mode == "auto":
+            print(f"bol: tap or hold {key} to talk. Ctrl+C to quit.")
+        else:
+            mode = self.cfg.hotkey.mode.replace("_", "-")
+            print(f"bol: hold {key} to talk ({mode}). Ctrl+C to quit.")
         try:
             await asyncio.Event().wait()
         finally:
             self.hotkey.stop()
+            await self.recorder.close()
             await self.server.stop()
             await self.engine.stop()
 
@@ -154,11 +174,53 @@ class Daemon:
         listen = loop.create_task(self._listen_session(session, until_silence=False))
         listen.add_done_callback(_drain)
 
-    def _hotkey_released(self) -> None:
+    def _hotkey_released(self, kind: str = "hold") -> None:
+        """kind is "hold" (end the recording now) or "tap" (auto mode)."""
+        if kind == "tap":
+            self._tap_released()
+            return
         # Stops only its own session, inert if that press never got the mic.
         if self._ptt_session is not None:
             self._ptt_session.request_stop()
             self._ptt_session = None
+        self._tap_session = None
+        self._clear_tap()
+
+    def _tap_released(self) -> None:
+        if self._tap_session is not None:
+            # Second tap: the user is done early, before the silence gate.
+            self._tap_session.request_stop()
+            self._tap_session = None
+            self._ptt_session = None
+            self._clear_tap()
+            return
+        session, self._ptt_session = self._ptt_session, None
+        if session is None:
+            # The recording this press started is already over (it hit the
+            # cap, or the mic failed). Re-arm the key rather than leaving the
+            # listener convinced a recording is still running.
+            self._clear_tap()
+            return
+        # Too short to be a hold, so the user is still talking: hand the
+        # ending over to the energy gate instead of to the key.
+        session.until_silence = True
+        self._tap_session = session
+
+    def _clear_tap(self) -> None:
+        if self.hotkey is not None:
+            self.hotkey.clear_tap()
+
+    def _cue(self, name: str) -> None:
+        """Play a cue without waiting for it.
+
+        play_cue awaits afplay, so awaiting it here put the whole chime in
+        front of the microphone (or in front of the paste). Cues are
+        decoration; they never gate the thing the user asked for.
+        """
+        if not self.cfg.sound_cues:
+            return
+        task = asyncio.get_running_loop().create_task(play_cue(name))
+        task.add_done_callback(_drain)
 
     async def _listen_session(self, session, until_silence: bool) -> None:
         """Own the mic for one recording, then keep it open across hands-free
@@ -189,8 +251,9 @@ class Daemon:
         self._active_hands_free = until_silence
         try:
             try:
-                if self.cfg.sound_cues:
-                    await play_cue("listen")
+                # Fired, not awaited, and before record() so the chime and the
+                # mic open together instead of one after the other.
+                self._cue("listen")
                 audio = await self.recorder.record(session, until_silence=until_silence)
             except Exception as exc:
                 # A dead input device (headphones unplugged, another app
@@ -215,6 +278,13 @@ class Daemon:
             return await self._handle_utterance(text)
         finally:
             self._active_session = None
+            # This recording is over however it ended, so no stale tap state
+            # can swallow the next press.
+            if self._tap_session is session:
+                self._tap_session = None
+            if self._ptt_session is session:
+                self._ptt_session = None
+            self._clear_tap()
 
     async def _auto_listen(self) -> None:
         """Reopen the mic after Bol speaks (hook-driven). No-op if a listen
@@ -277,6 +347,18 @@ class Daemon:
         print("bol: denied.")
         return True
 
+    def _auto_sends(self, text: str) -> bool:
+        """Whether plain dictation should press Enter for the user.
+
+        The word floor is the guard: a stray noise or a one-word misfire gets
+        pasted and can be deleted, where sending it would have cost a whole
+        Claude turn. Anything ending in "send it" never reaches here, it is
+        already Action.SEND.
+        """
+        if self.cfg.hotkey.submit != "auto" or not text:
+            return False
+        return len(text.split()) >= self.cfg.hotkey.auto_send_min_words
+
     async def _apply(self, parsed) -> bool:
         action, text = parsed.action, parsed.text
         mode = self.cfg.cleanup.mode
@@ -294,6 +376,12 @@ class Daemon:
             if cleaned != text:
                 print(f"bol: cleaned -> {cleaned}")
                 text = cleaned
+        if action is Action.DICTATE and self._auto_sends(text):
+            # Plain speech is a whole instruction, so send it. A "type ..."
+            # prefix (Action.TYPE) still pastes without Enter, and a trailing
+            # "send it" is still stripped and honoured; only the silent
+            # "say the magic words or nothing happens" default goes away.
+            action = Action.SEND
         if action in (Action.DICTATE, Action.TYPE):
             # A bare "clean it up" parses as DICTATE with no text; injecting
             # a lone space would litter Claude's input box.
@@ -306,15 +394,13 @@ class Daemon:
         if action is Action.SEND:
             self._permission_session = None
             await self.bridge.inject(text, submit=True)
-            if self.cfg.sound_cues:
-                await play_cue("done")
+            self._cue("done")
             print("bol: sent. Claude's turn.")
             return False
         if action is Action.DISCARD:
             # C-u wipes Claude Code's input line.
             await self.bridge.inject_keys("C-u")
-            if self.cfg.sound_cues:
-                await play_cue("discard")
+            self._cue("discard")
             return True
         if action is Action.INTERRUPT:
             await self.bridge.interrupt()

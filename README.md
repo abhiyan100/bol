@@ -7,18 +7,18 @@
 [![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black.svg)](#install)
 [bol-voice.vercel.app](https://bol-voice.vercel.app)
 
-Hold a key, say what you want, and when Claude finishes the turn Bol tells
+Tap a key, say what you want, and when Claude finishes the turn Bol tells
 you out loud what happened, flags what failed, and asks what Claude should do
 next. Speech recognition, the summarizer, and the voice all run on your Mac.
 No account, no key, nothing leaves the machine.
 
 ```
-you   (hold right-Option)  "refactor the auth module and run the tests... send it"
+you   (tap right Option)   "refactor the auth module and run the tests"
 claude                      ...edits files, runs tests, finishes...
 bol   (out loud)            "Auth module's refactored and tests pass. One
                              deprecation warning in login.py though. Want
                              Claude to commit it?"
-you                         "yes, commit it, send"
+you   (tap)                 "yes, commit it"
 ```
 
 ## Install
@@ -93,12 +93,17 @@ Good tools; they stop at the input box.
 bol run
 ```
 
-Open Claude Code in any terminal, hold **right Option**, speak, release. Bol
-pastes into the window you are looking at. Voice commands ride on your speech:
+Open Claude Code in any terminal. **Tap right Option** and talk; tap again
+or just stop talking, and the text lands in the window you are looking at
+and is sent. **Hold** it instead for push-to-talk: release to send. The mic
+is live on the keystroke, with 300 ms of pre-roll, so the first word is never
+lost. Anything under three words is pasted without Enter, so a stray "yes"
+never reaches Claude unread. Voice commands ride on your speech:
 
 | You say | Bol does |
 |---|---|
-| "...fix the login bug **send it**" | pastes the prompt, presses Enter |
+| "...fix the login bug" (3+ words) | pastes the prompt, presses Enter |
+| "...fix the login bug **send it**" | same, in any mode and at any length |
 | "**type** hello world" | inserts text, no Enter |
 | "**send**" / "**go ahead**" | presses Enter (also answers permission prompts) |
 | "**close**" / "**scratch that**" | clears the input box |
@@ -115,9 +120,10 @@ send = ["ship it", "go"]
 interrupt = ["whoa whoa"]
 ```
 
-When Claude finishes, Bol speaks a summary and reopens the mic (hands-free
-mode, on by default), so the whole session is a conversation. When Claude
-asks for permission, Bol reads the request and waits for "go ahead" or "no".
+When Claude finishes, Bol speaks a summary. Tap to answer. Set
+`hands_free = true` and Bol reopens the mic by itself after speaking, so the
+whole session is a conversation with no keys at all. When Claude asks for
+permission, Bol reads the request and waits for "go ahead" or "no".
 
 Running several Claude Code sessions? Bol narrates the first one it hears
 from and tells you when it ignores another. Set `[server] follow = "all"` to
@@ -135,10 +141,16 @@ Highlights:
 ```toml
 [hotkey]
 key = "alt_r"                # right Option. On layouts where that is AltGr,
-mode = "push_to_talk"        # use "cmd_r" or "f13". Or "toggle" to tap.
+                             # use "cmd_r" or "f13".
+mode = "auto"                # tap to talk, hold for push-to-talk;
+                             # or "push_to_talk", "toggle"
+submit = "auto"              # send when you stop; "voice" = only on "send it"
+auto_send_min_words = 3      # shorter text is pasted, not sent
 
 [audio]
 input_device = ""            # name substring or index; empty = system default
+pre_roll_ms = 300            # audio kept from before the keystroke
+warm_s = 120                 # mic stays open this long after use (orange dot)
 
 [tts]
 engine = "kokoro"            # neural voice instead of `say`

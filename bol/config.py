@@ -27,6 +27,13 @@ class AudioConfig:
     energy_threshold: float = 3.0
     # Mic to record from: device index or name substring; empty = system default.
     input_device: str = ""
+    # Audio kept from just before the press, so the first syllable survives.
+    # Only available while the mic stream is still warm.
+    pre_roll_ms: int = 300
+    # Keep the mic stream running this long after a recording, then release
+    # the device. Bounded on purpose: a Bluetooth headset held open forever
+    # stays in its tinny headset profile.
+    warm_s: float = 120.0
 
 
 @dataclass
@@ -37,9 +44,23 @@ class SttConfig:
 
 @dataclass
 class HotkeyConfig:
-    # push_to_talk: hold key to speak; toggle: tap to start/stop.
-    mode: str = "push_to_talk"
+    # auto: tap to start (Bol ends the turn when you stop talking) or hold to
+    # speak, whichever you did. push_to_talk: hold only. toggle: tap on/off.
+    mode: str = "auto"  # auto | push_to_talk | toggle
     key: str = "alt_r"  # pynput key name
+    # auto mode: a press shorter than this is a tap, longer is a hold.
+    tap_ms: int = 400
+    # auto: plain dictation is submitted for you, like pressing Enter.
+    # voice: nothing is submitted until you say "send it".
+    submit: str = "auto"  # auto | voice
+    # submit = "auto" only fires on this many words or more. A one-word
+    # misfire ("yes") or a stray noise is pasted, never sent. Saying
+    # "send it" still submits whatever it is riding on, however short.
+    auto_send_min_words: int = 3
+
+
+HOTKEY_MODES = ("auto", "push_to_talk", "toggle")
+SUBMIT_MODES = ("auto", "voice")
 
 
 @dataclass
@@ -136,8 +157,11 @@ class Config:
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
-    # After Bol speaks a reply, automatically open the mic for the next instruction.
-    hands_free: bool = True
+    # After Bol speaks a reply, automatically open the mic for the next
+    # instruction. Off by default: with [hotkey] submit = "auto" a mic that
+    # reopens unasked can send whatever the room said next, and a tap is
+    # instant anyway.
+    hands_free: bool = False
     sound_cues: bool = True
 
     @property
@@ -171,15 +195,38 @@ def load_config(path: Path | None = None) -> Config:
     return cfg
 
 
+def _one_of(label: str, value: object, choices: tuple[str, ...]) -> None:
+    if value not in choices:
+        raise ValueError(
+            f"unknown {label} {value!r}. Choose one of: " + ", ".join(choices) + "."
+        )
+
+
+def validate_config(cfg: Config) -> None:
+    """Reject config values Bol cannot act on.
+
+    Called at startup rather than at load, so a typo costs one clear line
+    ("unknown [hotkey] mode ...") instead of a hotkey that quietly never fires.
+    """
+    _one_of("[hotkey] mode", cfg.hotkey.mode, HOTKEY_MODES)
+    _one_of("[hotkey] submit", cfg.hotkey.submit, SUBMIT_MODES)
+
+
 DEFAULT_CONFIG_TOML = """\
 # Bol configuration. Every key is optional; these are the defaults.
 
-hands_free = true    # reopen the mic automatically after Bol speaks
+# reopen the mic automatically after Bol speaks. Off by default: with
+# submit = "auto" below, a mic that reopens unasked can send whatever the room
+# said next, and tapping the hotkey is instant anyway.
+hands_free = false
 sound_cues = true    # audible blips when listening starts/stops
 
 [hotkey]
-mode = "push_to_talk"  # or "toggle"
+mode = "auto"          # tap or hold, whichever you did | "push_to_talk" | "toggle"
 key = "alt_r"          # right Option
+tap_ms = 400           # a press shorter than this counts as a tap, not a hold
+submit = "auto"        # auto: dictation submits itself | "voice": only "send it" submits
+auto_send_min_words = 3  # shorter than this is pasted, not sent; "send it" still submits
 
 # Remap any voice command to whatever you like. Unset keys keep defaults.
 # [commands]
@@ -189,6 +236,8 @@ key = "alt_r"          # right Option
 
 [audio]
 # input_device = "MacBook Pro Microphone"  # mic name substring or index; empty = system default
+pre_roll_ms = 300      # audio kept from just before the press, so no clipped first word
+warm_s = 120           # hold the mic stream open this long after a recording, then let it go
 
 [stt]
 engine = "parakeet"    # or "none" for text-only mode

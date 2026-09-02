@@ -1,9 +1,11 @@
 """Capture tests: the energy gate must never eat a push-to-talk utterance,
-and hands-free must still endpoint on its own. No hardware, no real time:
-a fake InputStream pumps scripted blocks at the recorder's callback.
+until-silence must still endpoint on its own, and the prepared mic must be
+built once, kept warm, and rebuilt when the device dies. No hardware: a fake
+InputStream pumps scripted blocks at the recorder's callback.
 """
 
 import asyncio
+import logging
 import types
 
 import numpy as np
@@ -47,32 +49,54 @@ def _cfg(**over):
 
 
 class FakeStream:
-    """Stands in for sd.InputStream: replays scripted blocks into the
-    callback from the event loop, one per tick."""
+    """Stands in for sd.InputStream: a long-lived object that replays
+    scripted blocks into the callback while it is started, one per tick.
+    Tests feed it more blocks to simulate a mic that keeps running between
+    recordings."""
 
     def __init__(self, blocks, on_exhausted, kwargs):
-        self.blocks = blocks
+        self.blocks = list(blocks)
         self.kwargs = kwargs
         self.on_exhausted = on_exhausted
+        self.active = False
         self.closed = False
+        self.starts = 0
+        self.fail_start = False
+        self._task = None
 
-    def __enter__(self):
+    def feed(self, blocks, on_exhausted=None):
+        self.blocks.extend(blocks)
+        if on_exhausted is not None:
+            self.on_exhausted = on_exhausted
+
+    def start(self):
+        if self.fail_start:
+            raise OSError("PortAudioError: device unavailable")
+        self.starts += 1
+        self.active = True
         self._task = asyncio.get_running_loop().create_task(self._pump())
-        return self
 
-    def __exit__(self, *_exc):
+    def stop(self):
+        self.active = False
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+    def close(self):
+        self.stop()
         self.closed = True
-        self._task.cancel()
-        return False
 
     async def _pump(self):
-        for chunk in self.blocks:
-            if self.closed:
-                return
-            self.kwargs["callback"](chunk.reshape(-1, 1), len(chunk), None, None)
-            await asyncio.sleep(0)
-        if self.on_exhausted is not None:
-            self.on_exhausted()
+        while self.active:
+            if self.blocks:
+                chunk = self.blocks.pop(0)
+                self.kwargs["callback"](chunk.reshape(-1, 1), len(chunk), None, None)
+                await asyncio.sleep(0)
+                continue
+            if self.on_exhausted is not None:
+                fire, self.on_exhausted = self.on_exhausted, None
+                fire()
+            await asyncio.sleep(0.001)
 
 
 def _fake_sd(monkeypatch, blocks=(), on_exhausted=None, devices=_DEVICES):
@@ -92,9 +116,13 @@ def _fake_sd(monkeypatch, blocks=(), on_exhausted=None, devices=_DEVICES):
     return opened
 
 
-async def _record(recorder, session, until_silence):
+async def _record(recorder, session, until_silence, close=True):
     audio = await recorder.record(session, until_silence=until_silence)
     await asyncio.sleep(0)  # let the pump task settle before the loop closes
+    if close:
+        # Releases the device and cancels the warm-window task, so nothing is
+        # left pending when the test's event loop closes.
+        await recorder.close()
     return audio
 
 
@@ -231,3 +259,150 @@ async def test_default_device_is_left_to_sounddevice(monkeypatch):
     await _record(recorder, session, until_silence=False)
 
     assert opened[0].kwargs["device"] is None
+
+
+# ---------------------------------------------------------------- prepared mic
+
+
+async def test_open_builds_the_stream_without_taking_the_device(monkeypatch):
+    # Construction is the expensive half (about 33 ms on an M-series Mac) and
+    # it must be paid at startup, not at the press. Starting it is separate,
+    # so nothing holds the mic until someone actually talks.
+    recorder = Recorder(_cfg())
+    opened = _fake_sd(monkeypatch)
+
+    await recorder.open()
+
+    assert len(opened) == 1
+    assert opened[0].starts == 0
+    await recorder.close()
+
+
+async def test_the_stream_is_built_once_and_reused(monkeypatch):
+    recorder = Recorder(_cfg())
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    await _record(recorder, first, until_silence=False, close=False)
+    stream = opened[0]
+    second = recorder.begin()
+    stream.feed(_speech(4), on_exhausted=second.request_stop)
+    audio = await _record(recorder, second, until_silence=False)
+
+    assert opened == [stream]   # one InputStream across both recordings
+    assert stream.starts == 1   # and the hardware was only started once
+    assert audio is not None
+
+
+async def test_the_warm_window_releases_the_microphone(monkeypatch):
+    # Codex's Bluetooth note: a stream held open forever keeps a headset in
+    # its tinny headset profile, so the warm window has to actually expire.
+    recorder = Recorder(_cfg(warm_s=0.01))
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    await _record(recorder, first, until_silence=False, close=False)
+    assert opened[0].active
+    await asyncio.sleep(0.05)
+    assert not opened[0].active   # released, but not thrown away
+
+    second = recorder.begin()
+    opened[0].feed(_speech(4), on_exhausted=second.request_stop)
+    audio = await _record(recorder, second, until_silence=False)
+
+    assert opened == [opened[0]]  # restarted, not rebuilt
+    assert opened[0].starts == 2
+    assert audio is not None
+
+
+async def test_the_start_latency_is_measured_once(monkeypatch, caplog):
+    recorder = Recorder(_cfg(warm_s=0.01))
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    with caplog.at_level(logging.DEBUG, logger="bol.audio"):
+        await _record(recorder, first, until_silence=False, close=False)
+        await asyncio.sleep(0.05)  # warm window elapses, next press restarts
+        second = recorder.begin()
+        opened[0].feed(_speech(4), on_exhausted=second.request_stop)
+        await _record(recorder, second, until_silence=False)
+
+    assert opened[0].starts == 2
+    measured = [r for r in caplog.records if "start latency" in r.getMessage()]
+    assert len(measured) == 1  # one debug line, not one per press
+
+
+async def test_pre_roll_from_a_warm_stream_is_prepended(monkeypatch):
+    recorder = Recorder(_cfg(pre_roll_ms=90))  # three blocks of pre-roll
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    await _record(recorder, first, until_silence=False, close=False)
+    stream = opened[0]
+    assert stream.active  # warm window holds it open
+    stream.feed(_silence(6))  # room tone, with nobody recording
+    await asyncio.sleep(0.05)
+
+    second = recorder.begin()
+    stream.feed(_speech(8), on_exhausted=second.request_stop)
+    audio = await _record(recorder, second, until_silence=False)
+
+    assert opened == [stream]
+    assert audio.size > 3 * BLOCK
+    # The first three blocks are the room tone the ring was holding when the
+    # press landed: audio from BEFORE record() was called.
+    head = audio[: 3 * BLOCK]
+    assert float(np.sqrt(np.mean(head**2))) < 0.01
+    assert float(np.sqrt(np.mean(audio[3 * BLOCK:] ** 2))) > 0.05
+
+
+async def test_a_dead_stream_is_dropped_and_rebuilt(monkeypatch):
+    stop = {"fn": lambda: None}
+    recorder = Recorder(_cfg(warm_s=0.01))
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=lambda: stop["fn"]())
+
+    first = recorder.begin()
+    stop["fn"] = first.request_stop
+    await _record(recorder, first, until_silence=False, close=False)
+    await asyncio.sleep(0.05)     # warm window elapses; the stream goes cold
+    opened[0].fail_start = True   # and the device disappears in the meantime
+
+    dead = recorder.begin()
+    with pytest.raises(OSError):
+        await recorder.record(dead, until_silence=False)
+    assert opened[0].closed       # dropped, not kept around broken
+    assert len(opened) == 1
+
+    third = recorder.begin()
+    stop["fn"] = third.request_stop
+    audio = await _record(recorder, third, until_silence=False)
+
+    assert len(opened) == 2       # the next press gets a fresh stream
+    assert audio is not None
+
+
+# ------------------------------------------------------------- mid-flight gate
+
+
+async def test_until_silence_set_mid_recording_endpoints_the_utterance(
+    monkeypatch,
+):
+    # The tap: the recording starts as push-to-talk, and the key release a
+    # moment later hands the ending over to the energy gate. Levels are
+    # measured from the first block, so the floor is ready when the flag flips.
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    opened = _fake_sd(monkeypatch, _silence(4) + _speech(8))
+
+    async def release():
+        await asyncio.sleep(0.03)
+        session.until_silence = True   # the tap
+        opened[0].feed(_silence(10))   # and then the speaker stops talking
+
+    asyncio.get_running_loop().create_task(release())
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    blocks = audio.size // BLOCK
+    # 4 + 8 plus the three silence blocks that endpointed it, not the cap.
+    assert 12 <= blocks <= 18

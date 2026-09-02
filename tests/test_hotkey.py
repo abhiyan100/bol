@@ -1,5 +1,6 @@
 """Hotkey tests: a mistyped key name and a missing Input Monitoring grant
-both used to produce a listener that looked armed and never fired.
+both used to produce a listener that looked armed and never fired, and auto
+mode has to tell a tap from a hold without a real clock.
 """
 
 import asyncio
@@ -58,14 +59,26 @@ def _install(monkeypatch, is_trusted=True):
     return made
 
 
-def _hotkey(mode="push_to_talk", key="alt_r"):
+def _hotkey(mode="push_to_talk", key="alt_r", tap_ms=400):
     events = []
     hk = HotkeyListener(
-        HotkeyConfig(mode=mode, key=key),
+        HotkeyConfig(mode=mode, key=key, tap_ms=tap_ms),
         lambda: events.append("press"),
-        lambda: events.append("release"),
+        lambda kind: events.append(f"release:{kind}"),
     )
     return hk, events
+
+
+class FakeClock:
+    """Drives the tap/hold decision without patching time out from under
+    asyncio: the listener reads its clock through one module-level name."""
+
+    def __init__(self, monkeypatch):
+        self.now = 1000.0
+        monkeypatch.setattr(listener_mod, "_monotonic", lambda: self.now)
+
+    def advance(self, ms):
+        self.now += ms / 1000
 
 
 # ------------------------------------------------------------- key resolution
@@ -131,7 +144,7 @@ async def test_push_to_talk_dispatch(monkeypatch):
     hk._handle_release(keyboard.Key.alt_r)
     await asyncio.sleep(0)
 
-    assert events == ["press", "release"]
+    assert events == ["press", "release:hold"]
 
 
 async def test_toggle_alternates(monkeypatch):
@@ -144,4 +157,103 @@ async def test_toggle_alternates(monkeypatch):
         hk._handle_release(keyboard.Key.alt_r)  # no-op in toggle mode
     await asyncio.sleep(0)
 
-    assert events == ["press", "release"]
+    assert events == ["press", "release:hold"]
+
+
+async def test_push_to_talk_ignores_how_long_the_key_was_held(monkeypatch):
+    # tap_ms belongs to auto mode only: push-to-talk must keep working the
+    # way it always did, however briefly the key was down.
+    _install(monkeypatch)
+    clock = FakeClock(monkeypatch)
+    hk, events = _hotkey(mode="push_to_talk")
+    hk.start()
+
+    hk._handle_press(keyboard.Key.alt_r)
+    clock.advance(50)  # far under tap_ms
+    hk._handle_release(keyboard.Key.alt_r)
+    await asyncio.sleep(0)
+
+    assert events == ["press", "release:hold"]
+
+
+# ----------------------------------------------------------------------- auto
+
+
+async def _tap(hk, clock, ms=120):
+    hk._handle_press(keyboard.Key.alt_r)
+    clock.advance(ms)
+    hk._handle_release(keyboard.Key.alt_r)
+    await asyncio.sleep(0)
+
+
+async def test_auto_hold_releases_on_key_up(monkeypatch):
+    _install(monkeypatch)
+    clock = FakeClock(monkeypatch)
+    hk, events = _hotkey(mode="auto")
+    hk.start()
+
+    hk._handle_press(keyboard.Key.alt_r)
+    clock.advance(900)
+    hk._handle_release(keyboard.Key.alt_r)
+    await asyncio.sleep(0)
+
+    assert events == ["press", "release:hold"]
+
+
+async def test_auto_tap_keeps_the_recording_running(monkeypatch):
+    _install(monkeypatch)
+    clock = FakeClock(monkeypatch)
+    hk, events = _hotkey(mode="auto")
+    hk.start()
+
+    await _tap(hk, clock)
+
+    # "tap" tells the daemon to let the energy gate end this one, not to stop
+    # recording the instant the key came up.
+    assert events == ["press", "release:tap"]
+
+
+async def test_a_second_tap_ends_the_tap_recording(monkeypatch):
+    _install(monkeypatch)
+    clock = FakeClock(monkeypatch)
+    hk, events = _hotkey(mode="auto")
+    hk.start()
+
+    await _tap(hk, clock)
+    await _tap(hk, clock)  # while the first recording is still running
+
+    # No second "press": this tap ended the recording instead of starting one.
+    assert events == ["press", "release:tap", "release:tap"]
+
+    await _tap(hk, clock)  # and the key is armed again afterwards
+    assert events == ["press", "release:tap", "release:tap", "press", "release:tap"]
+
+
+async def test_a_hold_while_a_tap_recording_runs_still_ends_it(monkeypatch):
+    _install(monkeypatch)
+    clock = FakeClock(monkeypatch)
+    hk, events = _hotkey(mode="auto")
+    hk.start()
+
+    await _tap(hk, clock)
+    hk._handle_press(keyboard.Key.alt_r)
+    clock.advance(900)  # held long, but the press was already spent
+    hk._handle_release(keyboard.Key.alt_r)
+    await asyncio.sleep(0)
+
+    assert events == ["press", "release:tap", "release:tap"]
+
+
+async def test_clear_tap_rearms_the_key(monkeypatch):
+    # The recording endpointed on silence on its own, so the daemon tells the
+    # listener. Without this the next press would be swallowed forever.
+    _install(monkeypatch)
+    clock = FakeClock(monkeypatch)
+    hk, events = _hotkey(mode="auto")
+    hk.start()
+
+    await _tap(hk, clock)
+    hk.clear_tap()
+    await _tap(hk, clock)
+
+    assert events == ["press", "release:tap", "press", "release:tap"]

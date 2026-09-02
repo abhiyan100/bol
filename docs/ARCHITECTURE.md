@@ -106,9 +106,23 @@ spoken "go ahead" must never answer a prompt the user is not looking at.
 constant time and refuses to bind a non-loopback host unless
 `allow_remote` is set.
 
-**Push-to-talk trusts the user; hands-free trusts the energy gate.** With
-the key held, every captured block is returned, so speech that starts the
-instant the key goes down is never dropped. Hands-free listening keeps the
+**The mic is ready before the key goes down.** The recorder builds one
+`sounddevice` stream and keeps it; the callback always feeds a two-second
+ring, so a recording can prepend 300 ms of pre-roll and the first syllable
+survives even when the user speaks before pressing. Starting hardware I/O
+measured 9 to 24 ms; the chime used to be awaited before recording and cost
+300 ms, so cues are now fire-and-forget tasks. The stream stops after a warm
+window (default two minutes) rather than running forever: Bluetooth headsets
+drop to their low-quality route while any app holds the mic.
+
+**Tap or hold, one key.** Key-down always starts recording; the release
+decides the gesture (under 400 ms is a tap, FluidVoice's threshold). A tap
+keeps listening until the next tap or trailing silence; a hold ends on
+release. In `submit = "auto"` a dictation of three or more words is pasted and
+sent in one motion, shorter text is pasted without Enter (Claude Code's own
+`/voice` rule), "type ..." never sends, and a trailing "send it" always does.
+Hands-free reopen after Bol speaks is opt-in: with auto-send, an unasked mic
+could turn room noise into a prompt. Hands-free listening keeps the energy
 gate, with the noise floor taken as the adaptive 20th percentile of block
 energy and hysteresis on release. The hotkey listener checks pynput's
 `IS_TRUSTED` after start and raises a clear Input Monitoring error instead
