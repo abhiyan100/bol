@@ -51,7 +51,9 @@ DEFAULT_PHRASES: dict[str, list[str]] = {
         "close", "cancel", "scratch that", "never mind", "nevermind",
         "discard",
     ],
-    "sleep": ["stop listening", "go to sleep", "sleep"],
+    # "pause" reads better than "sleep" now that the microphone is open by
+    # default: what it stops is the listening, and it comes back on a keypress.
+    "sleep": ["stop listening", "go to sleep", "pause bol", "pause", "sleep"],
     "interrupt": ["interrupt", "stop claude", "stop stop"],
     "repeat": ["say that again", "repeat that", "what did you say"],
     "clean": ["clean it up", "clean that up", "clean up", "fix it up",

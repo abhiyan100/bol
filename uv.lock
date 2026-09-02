@@ -148,6 +148,9 @@ dependencies = [
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
     { name = "pynput", marker = "sys_platform == 'darwin'" },
     { name = "pysilero-vad", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "sentencepiece", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "sherpa-onnx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "sherpa-onnx-core", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "sounddevice", marker = "sys_platform == 'darwin'" },
     { name = "tomli-w", marker = "sys_platform == 'darwin'" },
 ]
@@ -162,8 +165,6 @@ all = [
     { name = "num2words", marker = "sys_platform == 'darwin'" },
     { name = "parakeet-mlx", marker = "sys_platform == 'darwin'" },
     { name = "phonemizer-fork", marker = "sys_platform == 'darwin'" },
-    { name = "sentencepiece", marker = "sys_platform == 'darwin'" },
-    { name = "sherpa-onnx", marker = "sys_platform == 'darwin'" },
     { name = "spacy", marker = "sys_platform == 'darwin'" },
 ]
 kokoro = [
@@ -180,10 +181,6 @@ llm = [
 ]
 stt = [
     { name = "parakeet-mlx", marker = "sys_platform == 'darwin'" },
-]
-wake = [
-    { name = "sentencepiece", marker = "sys_platform == 'darwin'" },
-    { name = "sherpa-onnx", marker = "sys_platform == 'darwin'" },
 ]
 
 [package.dev-dependencies]
@@ -207,8 +204,9 @@ requires-dist = [
     { name = "phonemizer-fork", marker = "extra == 'kokoro'" },
     { name = "pynput", specifier = ">=1.7.6" },
     { name = "pysilero-vad", marker = "platform_machine == 'arm64'", specifier = ">=3.4" },
-    { name = "sentencepiece", marker = "extra == 'wake'", specifier = ">=0.2" },
-    { name = "sherpa-onnx", marker = "extra == 'wake'", specifier = ">=1.13" },
+    { name = "sentencepiece", marker = "platform_machine == 'arm64'", specifier = ">=0.2" },
+    { name = "sherpa-onnx", marker = "platform_machine == 'arm64'", specifier = ">=1.13" },
+    { name = "sherpa-onnx-core", marker = "platform_machine == 'arm64'", specifier = ">=1.13" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "spacy", marker = "extra == 'kokoro'", specifier = ">=3.8,<3.9" },
     { name = "tomli-w", specifier = ">=1.0" },
@@ -1442,11 +1440,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b9/05/580c097b8c62a290238fdf1d3db337cd1e897d6b0c5018645552959e461f/sherpa_onnx-1.13.7.tar.gz", hash = "sha256:58ec30d2702ebe86889fc24c077f5ecf6cbdd57d260eca00f179513a0d8bb6ee", size = 1045298, upload-time = "2026-09-01T06:15:56.806Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/42/730818dcd43361b7aac892a232dd0eac6a184d44a930d58e397824d12c69/sherpa_onnx-1.13.7-cp311-cp311-macosx_10_15_universal2.whl", hash = "sha256:9a88cfd3b6296b1e9056a6ab843f9f7c4e362f6f27c26e33aafbf917f536d20b", size = 4419440, upload-time = "2026-09-01T06:22:02.541Z" },
-    { url = "https://files.pythonhosted.org/packages/52/d6/211eccfaf2fc903a962e4f60a0222133f5cf7154de1d4012eff06e5556d5/sherpa_onnx-1.13.7-cp311-cp311-macosx_10_15_x86_64.whl", hash = "sha256:803013701e0acb95c704143adc2ac9c4dc587dfeba7a9bc5cfafd5d70da921b1", size = 2324512, upload-time = "2026-09-01T06:32:58.744Z" },
     { url = "https://files.pythonhosted.org/packages/22/51/4b3c17afe095cec4132fd456589d9f24a676c1bd35e86b13389fb62cd89a/sherpa_onnx-1.13.7-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:16292efe5fa07ca4532f57c2b5e67f2ef8cad83c418a60593a2dc60438048836", size = 2133569, upload-time = "2026-09-01T06:31:30.641Z" },
     { url = "https://files.pythonhosted.org/packages/a9/97/a46f3f36bf42ef0f94e56a9d10c1329bf92d74632f937a29d4e6c8ceeb3b/sherpa_onnx-1.13.7-cp312-cp312-macosx_10_15_universal2.whl", hash = "sha256:fce7cfab223d6bee0a58fa940b5057e2f3cf63613928b88e09ac99b477e40be0", size = 4443852, upload-time = "2026-09-01T07:00:29.658Z" },
-    { url = "https://files.pythonhosted.org/packages/67/2d/0cc3d4f91ee56ca8dfd82b9922a859613e77fe831379ea2b7eb6db6af0f1/sherpa_onnx-1.13.7-cp312-cp312-macosx_10_15_x86_64.whl", hash = "sha256:7fbdc37a3b2a1f45369a918b47960035fd15b0d365d42157d5cdc5335271ab86", size = 2342763, upload-time = "2026-09-01T05:09:34.386Z" },
     { url = "https://files.pythonhosted.org/packages/e0/ad/996399e34344faadbb4bb34a45b7300f5ee317bd2ae3c80564ae32764613/sherpa_onnx-1.13.7-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:fed61cc23dba8f212eeb2723d2e90108d6de95734c5ae427aeafdb10f09ec184", size = 2140038, upload-time = "2026-09-01T06:30:32.812Z" },
+]
+
+[[package]]
+name = "sherpa-onnx-core"
+version = "1.13.7"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d0/04/0348c408b99ab5bd490f70cfb5e40eb90c1ad269a17380400f9f345bd530/sherpa_onnx_core-1.13.7-py3-none-macosx_10_15_universal2.whl", hash = "sha256:d0131f93e8fabca773701e28301d81dff4f7445ba59e280fca319c585bac850a", size = 20329436, upload-time = "2026-09-01T05:33:47.588Z" },
+    { url = "https://files.pythonhosted.org/packages/26/0b/e03cdda14781c32f1f84b86c8307884a1a0afe89c563def821a9a2b466e1/sherpa_onnx_core-1.13.7-py3-none-macosx_11_0_arm64.whl", hash = "sha256:b191e79d4952199bd11ce05c5b29c5efb08ed43a5d96839202e8ab603ab96278", size = 9523627, upload-time = "2026-09-01T05:13:35.625Z" },
 ]
 
 [[package]]

@@ -15,8 +15,14 @@ submit = "voice" all paste without Enter, submit = "always" sends however the
 recording ended, and "send it" always submits. The Stop hook closes the loop
 by speaking what happened.
 
-With [wake] enabled = true, "hey Bol" starts a recording without the key, and
-for awake_s afterwards the next thing said needs no phrase at all. See
+There is also no key at all, by default. The keyword listener is up from the
+moment Bol starts, and four trigger words drive the whole loop without one:
+"type" starts dictation that is pasted after a three second pause and never
+submitted, "send it" presses Enter on what is already pasted, "scratch that"
+wipes it, and "hey Bol" starts the conversation flow above. "Stop listening"
+mutes the trigger words until the next keypress. For awake_s after anything
+said, the next sentence needs no trigger word at all, and awake_s = 0 is the
+setting for people who want only trigger words to ever start anything. See
 bol/wake for what that costs and how it is kept off the daemon's own process.
 
 While the user is still talking the pill shows the words as they are decoded.
@@ -34,19 +40,31 @@ import time
 from pathlib import Path
 
 from .audio import Recorder
-from .bridge import BridgeError, build_bridge
+from .audio.capture import CANCELLED
+from .bridge import BridgeError, build_bridge, frontmost_bundle_id
 from .bridge.focused import SubmitBlocked
 from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
 from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker
-from .hotkey import HotkeyListener
+from .hotkey import HotkeyListener, MouseListener
 from .hud import Hud, tool_line
 from .llm import LLMEngine
 from .speak import build_speaker, play_cue
 from .stt import STREAM_END, build_transcriber
 from .summarize import build_summarizer
-from .wake import WakeListener, strip_wake_phrase
+from .wake import (
+    CANCEL,
+    SEND,
+    SLEEP,
+    TYPE,
+    WAKE,
+    WakeListener,
+    keyword_map,
+    lead_phrases,
+    strip_wake_phrase,
+    trigger_phrases,
+)
 
 log = logging.getLogger("bol")
 
@@ -90,6 +108,20 @@ DELIBERATE_ENDS = ("release", "tap", "")
 # the next thing said.
 PASTE_HINT = "Pasted. Say send it, or tap and keep talking"
 PASTE_HINT_S = 2.5
+
+# The same line for a "type" dictation, which never submits by itself in any
+# mode: the whole meaning of the trigger word is "put these characters there".
+TYPE_HINT = "Pasted. Say send it to send"
+
+# And for the pause, which is the one state with no way out except the key.
+# Saying so is the difference between a paused Bol and a broken one.
+SLEEP_HINT = "Paused. Press the key to resume"
+
+# How often a recording a trigger word started checks that the user is still
+# looking at the same app. Every check is an osascript, and the thing being
+# caught (walking away from a microphone that opened itself) does not need
+# to be caught in under half a second.
+FRONTMOST_POLL_S = 0.5
 
 
 class _LiveWords:
@@ -172,6 +204,11 @@ class Daemon:
         self.recorder = Recorder(cfg.audio)
         self.transcriber = None if text_mode else build_transcriber(cfg)
         self.hotkey: HotkeyListener | None = None
+        # Watches for the click that means "not that". Optional, like wake.
+        self.mouse: MouseListener | None = None
+        # The recording a trigger word started, while it is running: the one
+        # a click or an app switch is allowed to cancel.
+        self._wake_session = None
         # Wake mode, when [wake] enabled = true and the extra is installed.
         # None the rest of the time, and every wake path checks for it.
         self.wake: WakeListener | None = None
@@ -179,6 +216,19 @@ class Daemon:
         # without a test that sleeps for a minute.
         self._clock = clock
         self._awake_until = 0.0
+        # spelling -> kind for every trigger word, built here rather than when
+        # the listener starts so the daemon can answer "what does this phrase
+        # mean" whether or not a child process ever came up.
+        self._wake_kinds = keyword_map(cfg.wake, cfg.commands)
+        # Every spelling that has to come back off the front of a transcript a
+        # "type" started: the trigger word is not part of what was dictated.
+        self._type_phrases = list(cfg.wake.phrases or ()) + trigger_phrases(
+            cfg.wake, cfg.commands
+        ).get(TYPE, [])
+        # Text Bol pasted and did not submit. A send phrase presses Enter on
+        # it; without one there is nothing to send, and "send it" said at the
+        # television must not press Enter on whatever the user typed by hand.
+        self._pending_paste = False
         # The on-screen pill. Inert until start(), and every call on it is a
         # no-op when the child is missing.
         self.hud = Hud(enabled=cfg.ui.pill, position=cfg.ui.position)
@@ -246,6 +296,14 @@ class Daemon:
             self.cfg.hotkey, self._hotkey_pressed, self._hotkey_released
         )
         self.hotkey.start()
+        if self.wake is not None:
+            # Started after the hotkey, and only when a trigger word can open
+            # the microphone on its own: it exists to cancel those recordings
+            # and has nothing to watch otherwise. Same permission, so it adds
+            # no prompt, and it never raises.
+            mouse = MouseListener(self._clicked)
+            if mouse.start():
+                self.mouse = mouse
         key = self.cfg.hotkey.key
         phrase = self._wake_phrase()
         if self.cfg.hotkey.mode == "auto":
@@ -257,6 +315,8 @@ class Daemon:
             await asyncio.Event().wait()
         finally:
             self.hotkey.stop()
+            if self.mouse is not None:
+                self.mouse.stop()
             await self._stop_wake()
             await self.hud.stop()
             await self.recorder.close()
@@ -310,15 +370,21 @@ class Daemon:
     # --------------------------------------------------------------------- wake
 
     async def _start_wake(self) -> None:
-        """Arm "hey Bol", if it is switched on and able to run.
+        """Arm the trigger words, if they are switched on and able to run.
 
-        Every way this can fail is a warning and a daemon that carries on with
-        the hotkey: a missing extra, a missing model, a child that will not
-        start. Wake is a second way in, never the only one.
+        Every way this can fail is one line and a daemon that carries on with
+        the hotkey: a missing package, a model nobody has downloaded yet, a
+        child that will not start. Trigger words are a second way in, and the
+        first one has to keep working when they are not there.
         """
         if not self.cfg.wake.enabled or self.text_mode or self.transcriber is None:
             return
-        listener = WakeListener(self.cfg.wake, self._wake_detected, clock=self._clock)
+        listener = WakeListener(
+            self.cfg.wake,
+            self._wake_detected,
+            commands=self.cfg.commands,
+            clock=self._clock,
+        )
         if not await listener.start():
             return
         try:
@@ -341,33 +407,168 @@ class Daemon:
         await listener.stop()
 
     def _wake_phrase(self) -> str:
-        """What to add to the startup line when wake is armed."""
+        """What to add to the startup line when the trigger words are armed."""
         if self.wake is None:
             return ""
-        first = next(iter(self.cfg.wake.phrases), "hey bol")
-        return f', or say "{first}",'
+        said = lead_phrases(self.cfg.wake, self.cfg.commands)[:2]
+        if not said:
+            return ""
+        return ", or say " + " or ".join(f'"{phrase}"' for phrase in said) + ","
 
-    def _wake_detected(self, score: float) -> None:
-        """The child heard the phrase. From here on this is exactly a tap.
+    def _wake_detected(self, score: float, phrase: str = "") -> None:
+        """The child heard a trigger word. What happens next depends on which.
 
-        Same pill, same pre-roll, same silence endpointing, same auto-send
-        rules: the only difference is what started it. Ignored while a
-        recording is already running, because that recording is the answer to
-        whatever the user is saying now.
+        "send it" and "scratch that" act on text that is already in Claude's
+        box, so they start no recording at all: there is nothing left to say.
+        "stop listening" stops the trigger words until the next keypress.
+        "type" and "hey bol" both open the microphone, and from there a wake
+        is exactly a tap (same pill, same pre-roll, same auto-send rules)
+        while a type is dictation: a longer pause ends it and it is never
+        submitted. Both are ignored while a recording is already running,
+        because that recording is the answer to whatever is being said now.
         """
         if self.wake is None or self._asleep:
             return
+        kind = self._wake_kinds.get(phrase, WAKE)
+        if kind in (SEND, CANCEL, SLEEP):
+            self._wake_command(kind, phrase)
+            return
         if self._listen_lock.locked() or self._pending_listen:
             return
-        log.info("wake phrase heard (%.2f)", score)
+        log.info("heard %r (%.2f)", phrase or "a trigger word", score)
         self.hud.set("listening", "Listening")
         self._touch_awake()
         self._prewarm()
-        session = self.recorder.begin()
+        session = self._begin(kind)
         loop = asyncio.get_running_loop()
         loop.create_task(self.speaker.stop()).add_done_callback(_drain)
-        listen = loop.create_task(self._listen_session(session, until_silence=True))
+        listen = loop.create_task(
+            self._listen_session(session, until_silence=True, trigger=kind)
+        )
         listen.add_done_callback(_drain)
+
+    def _begin(self, trigger: str = ""):
+        """A recording session, with the timings its trigger word implies.
+
+        Both overrides only ever apply to a recording nobody pressed a key
+        for. A hotkey recording waits the full listen_window_s for someone to
+        start, because the user's hand on the key is already the statement
+        that they mean to say something; a microphone that opened itself on a
+        word heard across the room has to give up much sooner than that, and
+        pause_ms is the number the user already picked for "a pause".
+        """
+        session = self.recorder.begin()
+        if trigger:
+            session.window_ms = int(self.cfg.wake.pause_ms)
+        if trigger == TYPE:
+            session.silence_ms = int(self.cfg.wake.pause_ms)
+        return session
+
+    def _wake_command(self, kind: str, phrase: str = "") -> None:
+        """A trigger word that acts on text rather than starting a recording."""
+        if kind == SLEEP:
+            log.info("heard %r, pausing", phrase or kind)
+            self._go_to_sleep()
+            return
+        if not self._pending_paste:
+            # Nothing of Bol's is sitting in the input box, so there is
+            # nothing to send or to wipe. Silence is the right answer: the
+            # alternative is pressing Enter on something the user typed.
+            log.debug("heard %r with nothing pasted, ignored", phrase or kind)
+            return
+        task = asyncio.get_running_loop().create_task(self._run_wake_command(kind))
+        task.add_done_callback(_drain)
+
+    async def _run_wake_command(self, kind: str) -> None:
+        try:
+            if kind == SEND:
+                self._permission_session = None
+                await self.bridge.inject_keys("Enter")
+                self._pending_paste = False
+                self.hud.set("sending", "Sent")
+                self._cue("done")
+                print("bol: sent. Claude's turn.")
+            else:
+                await self.bridge.inject_keys("C-u")
+                self._pending_paste = False
+                self._idle_pill()
+                self._cue("discard")
+                print("bol: scratched that.")
+        except SubmitBlocked as exc:
+            # The paste is still there and still unsent, so the flag stays up
+            # and saying it again once Claude is in front will work.
+            log.info("submit withheld: %s", exc)
+            await self._speak(
+                "That window doesn't look like Claude, so I didn't press Enter."
+            )
+        except BridgeError as exc:
+            await self._speak(f"Couldn't reach Claude: {exc}", state="error")
+
+    def _go_to_sleep(self) -> None:
+        """Stop hearing trigger words until the next hotkey press.
+
+        The mute is what makes this a pause rather than a label: _asleep alone
+        would leave the keyword model listening and burning a core for
+        detections the daemon then throws away. _unmute_wake is a no-op while
+        this flag is up, so the recording and the reply that were in flight
+        when it was set cannot quietly switch the ear back on.
+        """
+        self._asleep = True
+        # Or the next pause would reopen the mic Bol was just told to leave.
+        self._awake_until = 0.0
+        self._mute_wake()
+        self.hud.set("sending", SLEEP_HINT, hold=PASTE_HINT_S)
+        print("bol: paused. Press the key to resume.")
+
+    # ------------------------------------------------------------ cancelling
+
+    def _clicked(self) -> None:
+        """A mouse button went down somewhere. On the event loop.
+
+        Only ever cancels a recording a trigger word started. A hotkey
+        recording is one the user is holding a key for, and clicking while
+        dictating (to put the cursor somewhere, to bring a window forward) is
+        a thing people do on purpose.
+        """
+        self._cancel_wake_recording("a click")
+
+    def _cancel_wake_recording(self, why: str) -> None:
+        session = self._wake_session
+        if session is None:
+            return
+        self._wake_session = None
+        log.info("recording cancelled: %s", why)
+        session.request_stop(CANCELLED)
+
+    async def _watch_frontmost(self, session) -> None:
+        """Cancel this recording if the user goes somewhere else.
+
+        Polled rather than subscribed: the notification would be an
+        NSWorkspace observer and a second event source to own, where this
+        runs for the few seconds of one wake recording and stops. Reading it
+        costs an osascript, so the interval is 500 ms and not less.
+
+        A blank answer is "could not read it" (usually a missing Automation
+        permission), never "no app is frontmost", so it is ignored: a
+        permission Bol does not have must not cancel every recording.
+        """
+        try:
+            was = await frontmost_bundle_id()
+            while not session.stopped:
+                await asyncio.sleep(FRONTMOST_POLL_S)
+                if session.stopped:
+                    return
+                now = await frontmost_bundle_id()
+                if not now or not was:
+                    was = now or was
+                    continue
+                if now != was:
+                    self._cancel_wake_recording(f"{was} gave way to {now}")
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a watcher must not end a recording
+            log.debug("could not watch the frontmost app: %s", exc)
 
     def _touch_awake(self) -> None:
         """Start (or extend) the window in which no wake phrase is needed."""
@@ -387,7 +588,10 @@ class Daemon:
             self.wake.mute()
 
     def _unmute_wake(self) -> None:
-        if self.wake is not None:
+        # Never while paused. Both callers are "whatever I was doing is over",
+        # and a pause set during a recording or a reply would otherwise be
+        # undone by the finally clause of the thing it interrupted.
+        if self.wake is not None and not self._asleep:
             self.wake.unmute()
 
     # ---------------------------------------------------------------- listening
@@ -407,7 +611,13 @@ class Daemon:
         # First line on purpose: the pill has to appear on the keystroke, not
         # after the mic, the prewarm, or anything else this press starts.
         self.hud.set("listening", "Listening")
-        self._asleep = False
+        if self._asleep:
+            # The key is the only way back from a pause, and it says so on the
+            # pill when the pause starts. Both halves come back together: the
+            # loop, and the ear that was muted with it.
+            self._asleep = False
+            self._unmute_wake()
+            print("bol: listening again.")
         # A tap opens the awake window too: having reached for the key once,
         # the user should not have to reach for it again to say the next thing.
         self._touch_awake()
@@ -476,10 +686,19 @@ class Daemon:
         task = asyncio.get_running_loop().create_task(play_cue(name))
         task.add_done_callback(_drain)
 
-    async def _listen_session(self, session, until_silence: bool) -> None:
+    async def _listen_session(
+        self, session, until_silence: bool, trigger: str = ""
+    ) -> None:
         """Own the mic for one recording, then keep it open across hands-free
         follow-ups (the reopen loop: chaining must happen here, not via a
-        nested call that would deadlock on our own lock)."""
+        nested call that would deadlock on our own lock).
+
+        trigger is the kind of trigger word that started this, or "" for the
+        hotkey, and it rides the whole loop rather than the first recording
+        alone. A "type" that opened the awake window means the next sentence
+        is dictation too, and having to say the trigger word again after every
+        pause is exactly what the awake window exists to spare people.
+        """
         if self._pending_listen:
             return  # one queued press is enough; drop extras
         self._pending_listen = True
@@ -487,10 +706,12 @@ class Daemon:
             async with self._listen_lock:
                 self._pending_listen = False
                 while True:
-                    outcome = await self._capture_and_handle(session, until_silence)
+                    outcome = await self._capture_and_handle(
+                        session, until_silence, trigger
+                    )
                     if not self._reopens(outcome):
                         break
-                    session = self.recorder.begin()
+                    session = self._begin(trigger)
                     until_silence = True
         finally:
             self._pending_listen = False
@@ -552,13 +773,25 @@ class Daemon:
             # runs on the finished recording either way.
             log.debug("live words failed: %s", exc)
 
-    async def _capture_and_handle(self, session, until_silence: bool) -> str:
+    async def _capture_and_handle(
+        self, session, until_silence: bool, trigger: str = ""
+    ) -> str:
+        typing = trigger == TYPE
         self._active_session = session
         self._active_hands_free = until_silence
         # The wake listener and this recording are the same microphone. Bol
         # is already listening properly, so the keyword model has nothing to
         # add and every chance to hear the dictation as a wake.
         self._mute_wake()
+        watcher = None
+        if trigger:
+            # Only for a recording that started itself: this is the one the
+            # user may not have meant, so it is the one that watches for them
+            # doing something else instead.
+            self._wake_session = session
+            watcher = asyncio.get_running_loop().create_task(
+                self._watch_frontmost(session)
+            )
         try:
             live = self._start_live(session)
             try:
@@ -584,6 +817,15 @@ class Daemon:
                     "Lost the microphone. Check your input device.", state="error"
                 )
                 return STOP
+            if session.end_reason == CANCELLED:
+                # A click, or the user is in another app now. Whatever was
+                # said belongs to what they went to do, so it is not
+                # transcribed, not pasted, and the window that would have
+                # reopened the microphone is shut with it.
+                self._awake_until = 0.0
+                self.hud.set("idle")
+                print("bol: cancelled.")
+                return STOP
             if audio is None:
                 log.debug("no speech captured")
                 self._idle_pill()
@@ -599,9 +841,13 @@ class Daemon:
                 await self._speak("Couldn't transcribe that one. Try again.", state="error")
                 return STOP
             if self.cfg.wake.enabled:
-                # The wake phrase started the recording; it is not part of
-                # what was dictated, and the grammar must never see it.
-                text = strip_wake_phrase(text, self.cfg.wake.phrases)
+                # The trigger word started the recording; it is not part of
+                # what was dictated, and the grammar must never see it. Only
+                # a dictation strips "type", because in a conversation
+                # "type hello world" is the grammar's own command.
+                text = strip_wake_phrase(
+                    text, self._type_phrases if typing else self.cfg.wake.phrases
+                )
             if not text:
                 self._idle_pill()
                 return QUIET
@@ -612,9 +858,13 @@ class Daemon:
             self._touch_awake()
             # How the recording ended travels with the words: it is the only
             # evidence of whether the user had finished saying them.
-            handled = await self._handle_utterance(text, session.end_reason)
+            handled = await self._handle_utterance(text, session.end_reason, typing)
             return CHAIN if handled else STOP
         finally:
+            if watcher is not None:
+                watcher.cancel()
+            if self._wake_session is session:
+                self._wake_session = None
             self._active_session = None
             # This recording is over however it ended, so no stale tap state
             # can swallow the next press.
@@ -651,7 +901,9 @@ class Daemon:
     _YES = {"yes", "yeah", "yep", "approve", "go ahead", "do it"}
     _NO = {"no", "nope", "deny", "don't", "dont"}
 
-    async def _handle_utterance(self, text: str, end_reason: str = "") -> bool:
+    async def _handle_utterance(
+        self, text: str, end_reason: str = "", typing: bool = False
+    ) -> bool:
         """Act on one utterance. Returns True if the mic should reopen
         immediately (hands-free chaining), False if the turn passed to Claude
         or the loop should go quiet.
@@ -659,6 +911,9 @@ class Daemon:
         end_reason is how the recording that produced this text ended (see
         bol/audio/capture.py). Empty means nobody said: text mode types whole
         lines, and a typed line is already deliberate.
+
+        typing means a "type" started this, so nothing here submits by itself
+        however the recording ended and whatever [hotkey] submit says.
         """
         try:
             if self._permission_session is not None:
@@ -667,10 +922,13 @@ class Daemon:
                     return await self._answer_permission(approve=True)
                 if norm in self._NO:
                     return await self._answer_permission(approve=False)
-            return await self._apply(self.grammar.parse(text), end_reason)
+            return await self._apply(self.grammar.parse(text), end_reason, typing)
         except SubmitBlocked as exc:
-            # The text WAS typed; only the Enter was withheld.
+            # The text WAS typed; only the Enter was withheld. Which is
+            # exactly a pending paste, and saying "send it" once Claude is in
+            # front is now the way to finish it.
             log.info("submit withheld: %s", exc)
+            self._pending_paste = True
             await self._speak(
                 "Typed it, but that window doesn't look like Claude, "
                 "so I didn't press Enter."
@@ -695,10 +953,12 @@ class Daemon:
             return True
         if approve:
             await self.bridge.inject_keys("Enter")
+            self._pending_paste = False
             self.hud.set("sending", "Approved")
             print("bol: approved.")
             return False
         await self.bridge.inject_keys("Escape")
+        self._pending_paste = False
         self.hud.set("sending", "Denied")
         print("bol: denied.")
         return True
@@ -734,7 +994,7 @@ class Daemon:
             return False
         return self._auto_sends(text, "tap")
 
-    async def _apply(self, parsed, end_reason: str = "") -> bool:
+    async def _apply(self, parsed, end_reason: str = "", typing: bool = False) -> bool:
         action, text = parsed.action, parsed.text
         mode = self.cfg.cleanup.mode
         wants_clean = (parsed.clean and mode != "off") or (
@@ -753,12 +1013,18 @@ class Daemon:
                 print(f"bol: cleaned -> {cleaned}")
                 text = cleaned
         held_back = action is Action.DICTATE and self._pasted_on_silence(text, end_reason)
-        if action is Action.DICTATE and self._auto_sends(text, end_reason):
+        if action is Action.DICTATE and not typing and self._auto_sends(text, end_reason):
             # Plain speech is a whole instruction the user finished on
             # purpose, so send it. A "type ..." prefix (Action.TYPE) still
             # pastes without Enter, and a trailing "send it" is still stripped
             # and honoured; only the silent "say the magic words or nothing
             # happens" default goes away.
+            #
+            # A dictation the "type" trigger started never reaches here at
+            # all: "type" means put these characters there, and a pause is
+            # what ends it, so there is no mode in which it presses Enter for
+            # itself. An explicit "send it" on the end still parses as SEND
+            # and still sends, because that is the user saying so.
             action = Action.SEND
         if action in (Action.DICTATE, Action.TYPE):
             # A bare "clean it up" parses as DICTATE with no text; injecting
@@ -768,6 +1034,13 @@ class Daemon:
             await self.bridge.inject(
                 text + " " if action is Action.DICTATE else text, submit=False
             )
+            # Bol put text in the box and did not submit it, which is the
+            # whole precondition for a "send it" that presses Enter on it.
+            self._pending_paste = True
+            if typing:
+                self.hud.set("sending", TYPE_HINT, hold=PASTE_HINT_S)
+                print("bol: pasted. Say send it to send.")
+                return True
             if held_back:
                 # This one would have been sent if the user had said so, so
                 # the pill says how to say so rather than going quiet and
@@ -782,6 +1055,7 @@ class Daemon:
         if action is Action.SEND:
             self._permission_session = None
             await self.bridge.inject(text, submit=True)
+            self._pending_paste = False
             self.hud.set("sending", "Sent")
             self._cue("done")
             print("bol: sent. Claude's turn.")
@@ -789,20 +1063,17 @@ class Daemon:
         if action is Action.DISCARD:
             # C-u wipes Claude Code's input line.
             await self.bridge.inject_keys("C-u")
+            self._pending_paste = False
             self._idle_pill()
             self._cue("discard")
             return True
         if action is Action.INTERRUPT:
             await self.bridge.interrupt()
+            self._pending_paste = False
             await self._speak("Interrupted.")
             return True
         if action is Action.SLEEP:
-            self._asleep = True
-            # "Stop listening" closes the awake window too, or the next pause
-            # would reopen the mic Bol was just told to leave alone.
-            self._awake_until = 0.0
-            self.hud.set("idle")
-            print("bol: sleeping. Press the hotkey when you need me.")
+            self._go_to_sleep()
             return False
         if action is Action.REPEAT:
             if self._last_reply:

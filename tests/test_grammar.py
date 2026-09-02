@@ -1,3 +1,5 @@
+import pytest
+
 from bol.grammar import Action, parse_transcript
 
 
@@ -44,6 +46,13 @@ def test_close_discards():
 
 def test_sleep():
     assert parse_transcript("stop listening").action is Action.SLEEP
+
+
+@pytest.mark.parametrize("said", ["pause", "pause bol", "go to sleep", "sleep"])
+def test_pause_is_how_you_say_stop_listening(said):
+    # What it stops is the listening, and the key brings it back, so "pause"
+    # is the word for it now that the microphone is open by default.
+    assert parse_transcript(said).action is Action.SLEEP
 
 
 def test_interrupt():

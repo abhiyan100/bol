@@ -65,11 +65,16 @@ _RING_MS = 2000
 #   release: the held key came up.
 #   tap:     a second tap ended a recording the first tap started.
 #   silence: the speech gate endpointed after trailing silence.
-#   window:  listen_window_s passed with nobody speaking.
+#   window:  the no-speech window passed with nobody speaking.
 #   max:     max_utterance_s (or its wall-clock backstop) ran out.
+#   cancelled: the user did something else instead (a click, another app).
 #   stop:    someone else stopped it: barge-in, shutdown, an unnamed caller.
 # The first two are the user saying "done"; the rest are Bol deciding.
-END_REASONS = ("release", "tap", "silence", "window", "max", "stop")
+END_REASONS = ("release", "tap", "silence", "window", "max", "cancelled", "stop")
+
+# What a recording ended by a click or an app switch is called. Its audio is
+# dropped rather than transcribed: the user is looking at something else.
+CANCELLED = "cancelled"
 
 
 def _resolve_input_device(spec: str) -> int | None:
@@ -129,9 +134,19 @@ class RecordingSession:
     decide whether the words were finished too. Letting the key go or tapping
     a second time is someone saying "done"; the silence gate ending an
     utterance only means they paused, and people pause mid-sentence.
+
+    silence_ms overrides [audio] silence_ms for this recording alone, and is
+    how a "type" dictation gets its own, much longer pause: dictating a prompt
+    has thinking pauses in it that a conversational turn does not, and one
+    number cannot be both. window_ms is the same idea for the other end, the
+    wait for anyone to start speaking at all: a recording a trigger word
+    opened by mistake should give the microphone back in seconds, where one
+    the user asked for can afford to wait.
     """
 
-    __slots__ = ("_stop", "until_silence", "tap", "end_reason")
+    __slots__ = (
+        "_stop", "until_silence", "tap", "end_reason", "silence_ms", "window_ms",
+    )
 
     def __init__(self, until_silence: bool = False) -> None:
         self._stop = asyncio.Event()
@@ -139,6 +154,10 @@ class RecordingSession:
         self.tap = None
         # One of END_REASONS once this recording is over; "" until then.
         self.end_reason = ""
+        # None means "whatever [audio] silence_ms says".
+        self.silence_ms = None
+        # None means "whatever [audio] listen_window_s says".
+        self.window_ms = None
 
     def note_end(self, reason: str) -> None:
         """Name what ended this recording; the first answer wins.
@@ -447,9 +466,13 @@ class Recorder:
         speech_blocks = 0
         silence_blocks = 0
         onset_blocks = 0
-        silence_limit = max(1, cfg.silence_ms // BLOCK_MS)
+        # Per recording, because a dictation and a conversational turn do not
+        # pause for the same reasons or for the same length of time.
+        silence_ms = session.silence_ms or cfg.silence_ms
+        silence_limit = max(1, int(silence_ms) // BLOCK_MS)
         max_blocks = cfg.max_utterance_s * 1000 // BLOCK_MS
-        window_blocks = cfg.listen_window_s * 1000 // BLOCK_MS
+        window_ms = session.window_ms or cfg.listen_window_s * 1000
+        window_blocks = max(1, int(window_ms) // BLOCK_MS)
         heard_speech = False
         # Wall clock as well as block count: a warm stream that goes silent
         # because the device vanished delivers nothing, and a block-only cap

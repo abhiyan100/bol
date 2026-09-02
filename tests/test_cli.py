@@ -18,6 +18,10 @@ PROBES = (
     "probe_wiring",
     "probe_permissions",
     "probe_weights",
+    # Wake is on by default, so this one reports on a keyword model and a
+    # package the machine running the tests may or may not have. Stubbed like
+    # the rest, or "all green" would mean "green on this laptop".
+    "probe_wake",
     "probe_injection",
 )
 

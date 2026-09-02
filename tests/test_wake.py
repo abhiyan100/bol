@@ -1,15 +1,21 @@
-"""Wake phrase tests: the child protocol, the daemon's use of it, and the two
-rules ("the phrase comes back off the transcript", "Bol is deaf while it
-speaks") that decide whether wake mode is usable or merely present.
+"""Trigger word tests: the child protocol, the phrase table, and what the
+daemon does with each kind.
+
+The rules that decide whether always-on listening is usable rather than
+merely present all live here: the trigger word comes back off the transcript,
+"type" never presses Enter, "send it" only ever presses Enter on something
+Bol pasted, Bol is deaf while it speaks, a pause is a pause until the key
+comes back, and a recording nobody asked for gives the microphone up.
 
 Nothing here imports sherpa-onnx or sentencepiece. CI installs base
-dependencies only, and the whole point of putting the keyword model in a
-child process is that the daemon's own tests never have to load it: the
-spotter, the BPE encoder, and the child process are all fakes.
+dependencies only on some machines, and the whole point of putting the
+keyword model in a child process is that the daemon's own tests never have to
+load it: the spotter, the BPE encoder, and the child process are all fakes.
 """
 
 import asyncio
 import io
+import logging
 import tarfile
 import types
 
@@ -17,7 +23,9 @@ import numpy as np
 import pytest
 
 import bol.cli as cli
+import bol.daemon as daemon_mod
 import bol.wake as wake
+from bol.bridge.focused import SubmitBlocked
 from bol.config import Config, validate_config
 from bol.daemon import Daemon
 from bol.wake import WakeListener, model as wake_model
@@ -27,9 +35,12 @@ from bol.wake.listener import (
     RESET_GAP_S,
     WakeError,
     keywords_text,
+    parse_phrase_arg,
     read_frame,
     run,
 )
+
+
 from test_daemon_loop import (
     FakeBridge,
     FakeHud,
@@ -37,6 +48,22 @@ from test_daemon_loop import (
     FakeSpeaker,
     FakeTranscriber,
 )
+
+
+@pytest.fixture(autouse=True)
+def no_osascript(monkeypatch):
+    """Nothing in this file may shell out to read the frontmost app.
+
+    Every recording a trigger word starts watches for the user going
+    somewhere else, and that watcher runs an osascript. Left real, these
+    tests would spawn a subprocess per recording and depend on which window
+    happens to be in front of the machine running them.
+    """
+
+    async def frontmost():
+        return "com.apple.Terminal"
+
+    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
 
 
 class Clock:
@@ -295,8 +322,11 @@ def test_a_custom_phrase_is_stripped_too():
 @pytest.mark.parametrize(
     "line,expected",
     [
-        ("wake 0.6 hey bol\n", 0.6),
-        ("wake 0.12\n", 0.12),
+        ("wake 0.6 hey bol\n", (0.6, "hey bol")),
+        ("wake 0.3 SEND IT\n", (0.3, "send it")),
+        # No phrase on it is still a detection, and means the plain wake the
+        # format used to be able to say and nothing else.
+        ("wake 0.12\n", (0.12, "")),
         ("wake\n", None),
         ("ready\n", None),
         ("", None),
@@ -378,7 +408,7 @@ async def _listener(clock=None, lines=(b"ready\n",), on_wake=None, proc=None):
     proc = proc or FakeProc(lines)
     listener = WakeListener(
         cfg,
-        on_wake or (lambda score: None),
+        on_wake or (lambda score, phrase: None),
         spawn=_spawner(proc),
         clock=clock or Clock(),
     )
@@ -411,27 +441,29 @@ async def test_a_child_that_dies_before_ready_is_not_armed(caplog):
     assert listener.running is False
 
 
-async def test_a_wake_line_reaches_the_callback():
+async def test_a_wake_line_reaches_the_callback_with_the_phrase():
+    # The phrase is not decoration: it is the only thing that says whether
+    # this was "type", "send it" or "hey bol".
     heard = asyncio.Event()
-    scores = []
+    hits = []
 
-    def on_wake(score):
-        scores.append(score)
+    def on_wake(score, phrase):
+        hits.append((score, phrase))
         heard.set()
 
     listener, proc = await _listener(on_wake=on_wake)
     assert await listener.start() is True
-    proc.stdout.push(b"wake 0.6 hey bol\n")
+    proc.stdout.push(b"wake 0.6 type\n")
 
     await asyncio.wait_for(heard.wait(), timeout=1.0)
 
-    assert scores == [0.6]
+    assert hits == [(0.6, "type")]
     await listener.stop()
 
 
 async def test_noise_on_the_child_pipe_is_ignored():
-    scores = []
-    listener, proc = await _listener(on_wake=scores.append)
+    hits = []
+    listener, proc = await _listener(on_wake=lambda score, phrase: hits.append(score))
     assert await listener.start() is True
     proc.stdout.push(b"onnxruntime: using CPU\n")
     proc.stdout.push(b"wake\n")
@@ -439,10 +471,10 @@ async def test_noise_on_the_child_pipe_is_ignored():
 
     for _ in range(20):
         await asyncio.sleep(0)
-        if scores:
+        if hits:
             break
 
-    assert scores == [0.5]
+    assert hits == [0.5]
     await listener.stop()
 
 
@@ -561,15 +593,52 @@ class TickingRecorder(FakeRecorder):
         return await super().record(session, until_silence)
 
 
-def _wake_daemon(utterances, texts, clock, awake_s=60.0, armed=True):
+class TriggerRecorder(TickingRecorder):
+    """Keeps the sessions it was handed, so a test can read the timings the
+    daemon put on them before the recording ran."""
+
+    def __init__(self, count, clock, tick=8.0) -> None:
+        super().__init__(count, clock, tick)
+        self.sessions = []
+
+    def begin(self):
+        session = super().begin()
+        self.sessions.append(session)
+        return session
+
+
+class BlockingRecorder(FakeRecorder):
+    """Records forever, until somebody stops the session. For the two ways a
+    recording ends that nobody in the room asked for."""
+
+    def __init__(self) -> None:
+        super().__init__(0)
+        self.started = asyncio.Event()
+
+    async def record(self, session, until_silence):
+        self.calls.append(until_silence)
+        self.started.set()
+        for _ in range(5000):
+            if session.stopped:
+                return None
+            await asyncio.sleep(0)
+        return None
+
+
+def _wake_daemon(
+    utterances, texts, clock, awake_s=60.0, armed=True, submit="voice", commands=None
+):
     cfg = Config()
     cfg.sound_cues = False
     cfg.hands_free = False
-    cfg.hotkey.submit = "voice"
+    cfg.hotkey.submit = submit
     cfg.wake.enabled = True
     cfg.wake.awake_s = awake_s
+    if commands:
+        # Before the Daemon is built: the phrase table is read once, there.
+        cfg.commands = commands
     d = Daemon(cfg, text_mode=False, clock=clock)
-    d.recorder = TickingRecorder(utterances, clock)
+    d.recorder = TriggerRecorder(utterances, clock)
     d.transcriber = FakeTranscriber(texts)
     d.bridge = FakeBridge()
     d.speaker = FakeSpeaker()
@@ -764,11 +833,17 @@ async def test_wake_is_not_started_in_text_mode():
 # ----------------------------------------------------------------- the config
 
 
-def test_wake_is_off_by_default():
+def test_the_trigger_words_are_on_by_default():
     cfg = Config().wake
-    assert cfg.enabled is False
+    assert cfg.enabled is True
     assert cfg.phrases == ["hey bol"]
+    assert cfg.type_phrases == ["type"]
+    assert cfg.send_phrases == ["send it", "send", "enter"]
+    assert cfg.cancel_phrases == ["scratch that", "close"]
+    assert cfg.sleep_phrases == ["stop listening"]
     assert cfg.threshold == 0.12
+    assert cfg.type_threshold == 0.0  # 0 = use threshold
+    assert cfg.pause_ms == 3000
     assert cfg.awake_s == 60.0
 
 
@@ -798,8 +873,28 @@ def test_the_default_file_is_honest_about_the_open_microphone():
         "Nothing is recorded or sent anywhere.",
         "false wake costs a Listening pill",
         "Turn your wifi off and try it",
+        # On by default now, so the way to close it has to be right there.
+        "enabled = false to close the microphone",
     ):
         assert promise in section
+
+
+def test_the_default_file_says_zero_disables_the_awake_window():
+    # The answer to "I want only trigger words to start anything" is a knob,
+    # and a knob nobody can find is not an answer.
+    from bol.config import DEFAULT_CONFIG_TOML
+
+    section = DEFAULT_CONFIG_TOML.split("[wake]", 1)[1]
+    assert "0 = only trigger words ever start anything" in section
+
+
+def test_the_type_threshold_is_documented_as_the_wrong_lever():
+    # Measured against `say`: raising it stops the real "type add a login
+    # test" firing before it stops the "type" inside "prototype".
+    from bol.config import DEFAULT_CONFIG_TOML
+
+    section = DEFAULT_CONFIG_TOML.split("[wake]", 1)[1]
+    assert "change type_phrases instead" in section
 
 
 def test_load_config_reads_the_wake_section(tmp_path):
@@ -808,15 +903,51 @@ def test_load_config_reads_the_wake_section(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
         "[wake]\nenabled = true\nphrases = [\"computer\"]\n"
-        "threshold = 0.3\nawake_s = 15\n"
+        "type_phrases = [\"dictate\"]\nsend_phrases = [\"off you go\"]\n"
+        "cancel_phrases = [\"forget it\"]\nsleep_phrases = [\"that's enough\"]\n"
+        "threshold = 0.3\ntype_threshold = 0.4\npause_ms = 1500\nawake_s = 15\n"
     )
 
     cfg = load_config(path)
 
     assert cfg.wake.enabled is True
     assert cfg.wake.phrases == ["computer"]
+    assert cfg.wake.type_phrases == ["dictate"]
+    assert cfg.wake.send_phrases == ["off you go"]
+    assert cfg.wake.cancel_phrases == ["forget it"]
+    assert cfg.wake.sleep_phrases == ["that's enough"]
     assert cfg.wake.threshold == 0.3
+    assert cfg.wake.type_threshold == 0.4
+    assert cfg.wake.pause_ms == 1500
     assert cfg.wake.awake_s == 15
+
+
+def test_a_configured_trigger_word_reaches_the_daemon(tmp_path):
+    # The whole path: a config file, a phrase table, and a daemon that knows
+    # "dictate" means dictation.
+    from bol.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text('[wake]\ntype_phrases = ["dictate"]\n')
+
+    cfg = load_config(path)
+
+    kinds = wake.keyword_map(cfg.wake, cfg.commands)
+    assert kinds["dictate"] == wake.TYPE
+    assert "type" not in kinds
+    assert Daemon(cfg, text_mode=True)._wake_kinds["dictate"] == wake.TYPE
+
+
+def test_wake_is_switched_off_in_one_line(tmp_path):
+    from bol.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text("[wake]\nenabled = false\n")
+
+    cfg = load_config(path)
+
+    assert cfg.wake.enabled is False
+    validate_config(cfg)  # and nothing else in the section is second-guessed
 
 
 @pytest.mark.parametrize(
@@ -828,6 +959,12 @@ def test_load_config_reads_the_wake_section(tmp_path):
         ("threshold", 1.5, "at most 1"),
         ("threshold", "loud", "must be a number"),
         ("awake_s", -1, "cannot be negative"),
+        ("type_threshold", 1.5, "between 0 and 1"),
+        ("type_threshold", -0.1, "between 0 and 1"),
+        ("type_threshold", "loud", "must be a number"),
+        ("pause_ms", 0, "must be above 0"),
+        ("pause_ms", -100, "must be above 0"),
+        ("pause_ms", "three", "must be a number"),
     ],
 )
 def test_a_wake_section_that_cannot_work_is_refused(field, value, message):
@@ -845,6 +982,7 @@ def test_a_disabled_wake_section_is_never_second_guessed():
     # A threshold someone left themselves a note about is not a reason to
     # refuse to start a daemon that will never read it.
     cfg = Config()
+    cfg.wake.enabled = False
     cfg.wake.threshold = 99
     cfg.wake.phrases = []
 
@@ -861,12 +999,16 @@ def _install_model(root):
 
 
 def test_doctor_stays_quiet_when_wake_is_off():
-    rows = cli.probe_wake(Config())
+    cfg = Config()
+    cfg.wake.enabled = False
+
+    rows = cli.probe_wake(cfg)
 
     assert len(rows) == 1
     status, label, _hint = rows[0]
     assert status == cli.INFO
     assert "off" in label
+    assert "hotkey still works" in label
 
 
 def test_doctor_names_the_missing_extra(monkeypatch, tmp_path):
@@ -878,8 +1020,9 @@ def test_doctor_names_the_missing_extra(monkeypatch, tmp_path):
     rows = cli.probe_wake(cfg)
 
     bad = [row for row in rows if row[0] == cli.BAD]
-    assert len(bad) == 2  # the extra and the model it never downloaded
-    assert "bol[stt,llm,wake]" in bad[0][2]
+    assert len(bad) == 2  # the package and the model it never downloaded
+    # Wake is base now, so the fix is a plain reinstall, not a ",wake" extra.
+    assert "bol[stt,llm]" in bad[0][2]
 
 
 def test_doctor_reports_the_model_and_what_it_listens_for(monkeypatch, tmp_path):
@@ -891,15 +1034,27 @@ def test_doctor_reports_the_model_and_what_it_listens_for(monkeypatch, tmp_path)
 
     rows = cli.probe_wake(cfg)
 
-    assert [row[0] for row in rows] == [cli.OK, cli.OK, cli.INFO]
+    assert [row[0] for row in rows] == [cli.OK, cli.OK, cli.INFO, cli.INFO]
     assert "on disk" in rows[1][1]
-    assert "hey bol, hey bowl, hey ball" in rows[2][1]
+    # What to say, not every spelling the decoder might produce: "hey bowl"
+    # is in the keyword file because the model emits it, not because anyone
+    # should be told to say it.
+    assert "listening for: hey bol, type, send it" in rows[2][1]
     assert "threshold 0.12" in rows[2][1]
+    assert "3s pause pastes a dictation" in rows[2][1]
+    assert rows[3][1] == cli.MIC_NOTE
+    assert "microphone indicator stays on" in rows[3][1]
 
 
 def test_setup_downloads_nothing_when_wake_is_off(capsys):
-    assert cli._setup_wake(Config()) is True
-    assert "off" in capsys.readouterr().out
+    cfg = Config()
+    cfg.wake.enabled = False
+
+    assert cli._setup_wake(cfg) is True
+
+    out = capsys.readouterr().out
+    assert "off" in out
+    assert "hotkey works as before" in out
 
 
 def test_setup_says_what_the_keyword_model_costs(monkeypatch, tmp_path, capsys):
@@ -922,6 +1077,9 @@ def test_setup_says_what_the_keyword_model_costs(monkeypatch, tmp_path, capsys):
     assert wake_model.MODEL_NAME in out
     assert "17.6 MB to download" in out
     assert fetched == [tmp_path / "models" / "kws"]
+    # Setup says the same two things the doctor does.
+    assert "listening for: hey bol, type, send it" in out
+    assert cli.MIC_NOTE in out
 
 
 # ------------------------------------------------------------------ the model
@@ -1038,6 +1196,594 @@ async def test_a_listener_that_will_not_start_is_simply_not_used():
         await d._start_wake()
     finally:
         daemon_mod.WakeListener = original
+
+    assert d.wake is None
+    assert d._awake() is False
+
+
+# --------------------------------------------------------- the trigger table
+
+
+@pytest.mark.parametrize(
+    "phrase,kind",
+    [
+        ("hey bol", wake.WAKE),
+        ("hey bowl", wake.WAKE),
+        ("hey ball", wake.WAKE),
+        ("type", wake.TYPE),
+        ("send it", wake.SEND),
+        ("send", wake.SEND),
+        ("enter", wake.SEND),
+        ("scratch that", wake.CANCEL),
+        ("close", wake.CANCEL),
+        ("stop listening", wake.SLEEP),
+    ],
+)
+def test_every_trigger_word_maps_to_one_kind(phrase, kind):
+    cfg = Config()
+
+    assert wake.keyword_map(cfg.wake, cfg.commands)[phrase] == kind
+
+
+def test_the_doctor_line_names_one_phrase_per_kind():
+    cfg = Config()
+
+    # Not "hey bowl": that is in the keyword file because the decoder emits
+    # it, not because anyone should be told to say it.
+    assert wake.lead_phrases(cfg.wake, cfg.commands) == [
+        "hey bol", "type", "send it", "scratch that", "stop listening",
+    ]
+
+
+def test_a_remapped_send_command_becomes_the_trigger_word():
+    # One name for sending. A grammar that says "ship it" and a keyword model
+    # still listening for "send it" is two answers to the same question.
+    cfg = Config()
+    cfg.commands = {"send": ["ship it", "fire away"]}
+
+    kinds = wake.keyword_map(cfg.wake, cfg.commands)
+
+    assert kinds["ship it"] == wake.SEND
+    assert kinds["fire away"] == wake.SEND
+    assert "send it" not in kinds
+
+
+def test_an_edited_wake_list_is_never_overruled_by_commands():
+    cfg = Config()
+    cfg.commands = {"send": ["ship it"]}
+    cfg.wake.send_phrases = ["fire it off"]
+
+    kinds = wake.keyword_map(cfg.wake, cfg.commands)
+
+    assert kinds["fire it off"] == wake.SEND
+    assert "ship it" not in kinds
+
+
+def test_a_spelling_two_kinds_claim_belongs_to_the_first():
+    # The child reports a spelling and nothing else, so a spelling that meant
+    # two things would be a coin toss every time it fired.
+    cfg = Config()
+    cfg.wake.cancel_phrases = ["type"]
+
+    assert wake.keyword_map(cfg.wake, cfg.commands)["type"] == wake.TYPE
+
+
+def test_blank_and_repeated_phrases_never_reach_the_keyword_file():
+    cfg = Config()
+    cfg.wake.type_phrases = ["  Type ", "type", ""]
+
+    args = wake.keyword_args(cfg.wake, cfg.commands)
+
+    assert args.count("type") == 1
+
+
+def test_only_type_may_carry_its_own_threshold():
+    cfg = Config()
+    assert "type" in wake.keyword_args(cfg.wake, cfg.commands)
+
+    cfg.wake.type_threshold = 0.3
+    args = wake.keyword_args(cfg.wake, cfg.commands)
+
+    assert "type=0.3" in args
+    assert "type" not in args
+    assert "send it" in args  # everything else stays on the shared threshold
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("type", ("type", None)),
+        ("type=0.3", ("type", 0.3)),
+        ("send it", ("send it", None)),
+        ("SEND IT", ("send it", None)),
+        # Not a number, so it was never a threshold suffix.
+        ("send=it", ("send=it", None)),
+    ],
+)
+def test_a_phrase_argument_may_carry_its_own_threshold(value, expected):
+    assert parse_phrase_arg(value) == expected
+
+
+def test_a_keyword_with_its_own_threshold_does_not_move_the_others(bpe):
+    bpe_model, tokens = bpe
+
+    text = keywords_text([("hey bol", 0.4), "hey bowl"], 0.12, bpe_model, tokens)
+
+    assert text == (
+        "▁HE Y ▁BO L :2 #0.4\n"
+        "▁HE Y ▁BO W L :2 #0.12\n"
+    )
+
+
+# ----------------------------------------------------------- the type flow
+
+
+def test_a_type_dictation_strips_only_the_leading_trigger_word():
+    phrases = ["hey bol", "type"]
+    assert wake.strip_wake_phrase("type the prototype loader", phrases) == (
+        "the prototype loader"
+    )
+    assert wake.strip_wake_phrase("type what type of file", phrases) == (
+        "what type of file"
+    )
+    # The word is only ever taken off the front, and only once.
+    assert wake.strip_wake_phrase("the prototype loader", phrases) == (
+        "the prototype loader"
+    )
+
+
+async def test_a_type_dictation_leaves_the_trigger_word_behind():
+    clock = Clock()
+    d = _wake_daemon(1, ["type add a login test"], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    # The trailing space is the tell: this went through as plain dictation
+    # with the trigger word already gone, not through the grammar's own
+    # "type ..." prefix, which pastes the payload with nothing added.
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+async def test_a_type_dictation_ends_on_the_wake_pause_not_the_audio_one():
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+    d.cfg.audio.silence_ms = 900
+    d.cfg.wake.pause_ms = 3000
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    session = d.recorder.sessions[0]
+    assert session.silence_ms == 3000
+    # And it gives the microphone back after the same pause if nobody speaks.
+    assert session.window_ms == 3000
+
+
+async def test_a_wake_keeps_the_audio_pause_and_takes_the_short_window():
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "hey bol")
+    await asyncio.sleep(0.05)
+
+    session = d.recorder.sessions[0]
+    assert session.silence_ms is None  # a conversation pauses like a conversation
+    assert session.window_ms == 3000   # but still gives up in seconds
+
+
+async def test_a_hotkey_recording_keeps_every_configured_timing():
+    # The hand on the key is already the statement that something is coming.
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+
+    d._hotkey_pressed()
+    await asyncio.sleep(0.05)
+
+    session = d.recorder.sessions[0]
+    assert session.silence_ms is None
+    assert session.window_ms is None
+
+
+@pytest.mark.parametrize("submit", ["auto", "always", "voice"])
+async def test_a_type_dictation_never_presses_enter(submit):
+    # "type" means put these characters there. Eight words ended on a pause
+    # would be sent under "always" and under "auto"; not this one.
+    clock = Clock()
+    d = _wake_daemon(
+        1, ["add a login test to the auth module"], clock, awake_s=0.0, submit=submit
+    )
+    d.recorder.end_reason = "silence"
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.injected == [("add a login test to the auth module ", False)]
+    assert d.bridge.keys == []
+    assert d._pending_paste is True
+
+
+async def test_a_type_dictation_says_how_to_send_it():
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    hint = ("sending", daemon_mod.TYPE_HINT, "")
+    assert hint in d.hud.calls
+    assert d.hud.holds[d.hud.calls.index(hint)] == daemon_mod.PASTE_HINT_S
+
+
+async def test_an_explicit_send_it_still_sends_a_type_dictation():
+    # The trigger word decides the default, never the user's own last words.
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test send it"], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert d._pending_paste is False
+
+
+async def test_a_type_dictation_stays_awake_for_the_next_sentence():
+    clock = Clock()
+    d = _wake_daemon(
+        2, ["add a login test", "and a logout test"], clock, awake_s=20.0
+    )
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    # The second sentence needed no trigger word, and was typed like the first.
+    assert d.bridge.injected == [
+        ("add a login test ", False),
+        ("and a logout test ", False),
+    ]
+    assert all(s.silence_ms == 3000 for s in d.recorder.sessions)
+
+
+async def test_awake_s_zero_means_only_trigger_words_start_anything():
+    clock = Clock()
+    d = _wake_daemon(2, ["add a login test", "never heard"], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.calls == [True]
+    assert d.bridge.injected == [("add a login test ", False)]
+    assert d._awake() is False
+
+
+async def test_a_phrase_the_table_never_heard_of_is_a_plain_wake():
+    # A child from another version, or a keyword file nobody updated: the
+    # safest reading of an unknown trigger word is the one that only opens
+    # the microphone.
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "something else entirely")
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.calls == [True]
+    assert d.recorder.sessions[0].silence_ms is None
+
+
+# ------------------------------------------------------- send, cancel, pause
+
+
+async def _typed(clock, text="add a login test", **kwargs):
+    """A daemon that has just pasted something and not sent it."""
+    d = _wake_daemon(1, [text], clock, awake_s=0.0, **kwargs)
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+    assert d._pending_paste is True
+    return d
+
+
+async def test_a_send_trigger_presses_enter_on_a_pending_paste():
+    clock = Clock()
+    d = await _typed(clock)
+
+    d._wake_detected(0.6, "send it")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.keys == [("Enter",)]
+    assert d._pending_paste is False
+    assert d.recorder.calls == [True]  # it started no recording of its own
+    assert d.hud.calls[-1][:2] == ("sending", "Sent")
+
+
+async def test_a_send_trigger_with_nothing_pasted_is_ignored():
+    # "Send it" on the television must never press Enter on something the
+    # user typed by hand.
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+
+    d._wake_detected(0.6, "send it")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.keys == []
+    assert d.bridge.injected == []
+    assert d.recorder.calls == []
+    assert d.hud.calls == []
+
+
+async def test_a_send_trigger_into_the_wrong_window_keeps_the_paste_pending():
+    class BlockedBridge(FakeBridge):
+        async def inject_keys(self, *keys):
+            if "Enter" in keys:
+                raise SubmitBlocked("Notes isn't Claude", "Notes isn't Claude")
+            await super().inject_keys(*keys)
+
+    clock = Clock()
+    d = await _typed(clock)
+    d.bridge = BlockedBridge()
+
+    d._wake_detected(0.6, "send it")
+    await asyncio.sleep(0.05)
+
+    # The Enter never landed, so the paste is still pending and saying it
+    # again with Claude in front will finish the job.
+    assert d._pending_paste is True
+    assert d.bridge.keys == []
+    assert "didn't press Enter" in d.speaker.spoken[-1]
+
+
+async def test_a_cancel_trigger_wipes_a_pending_paste():
+    clock = Clock()
+    d = await _typed(clock)
+
+    d._wake_detected(0.6, "scratch that")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.keys == [("C-u",)]
+    assert d._pending_paste is False
+    assert d.recorder.calls == [True]
+
+
+async def test_a_cancel_trigger_with_nothing_pasted_is_ignored():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+
+    d._wake_detected(0.6, "scratch that")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.keys == []
+
+
+async def test_a_send_after_a_hotkey_paste_works_too():
+    # The flag is about what is in the box, not about how it got there.
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+
+    d._hotkey_pressed()
+    await asyncio.sleep(0.05)
+    assert d._pending_paste is True
+
+    d._wake_detected(0.6, "send it")
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.keys == [("Enter",)]
+
+
+async def test_a_sleep_trigger_pauses_the_ear_as_well_as_the_loop():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+
+    d._wake_detected(0.6, "stop listening")
+
+    assert d._asleep is True
+    assert d.wake.muted is True  # no trigger words, and no core burnt on them
+    assert d._awake() is False
+    assert ("sending", daemon_mod.SLEEP_HINT, "") in d.hud.calls
+    assert d.hud.holds[-1] == daemon_mod.PASTE_HINT_S
+
+
+async def test_a_paused_bol_ignores_every_trigger_word():
+    clock = Clock()
+    d = _wake_daemon(1, ["never heard"], clock)
+    d._wake_detected(0.6, "stop listening")
+    d._pending_paste = True
+
+    for phrase in ("type", "hey bol", "send it", "scratch that"):
+        d._wake_detected(0.6, phrase)
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.calls == []
+    assert d.bridge.keys == []
+    assert d.bridge.injected == []
+
+
+async def test_the_spoken_sleep_command_pauses_the_ear_too(capsys):
+    # The regression this exists for: _capture_and_handle unmutes the wake
+    # listener in a finally, and that must not undo a pause set inside it.
+    clock = Clock()
+    d = _wake_daemon(1, ["stop listening"], clock, awake_s=60.0)
+
+    d._wake_detected(0.6, "hey bol")
+    await asyncio.sleep(0.05)
+
+    assert d._asleep is True
+    assert d.wake.muted is True
+    assert d._awake() is False
+    assert "paused. Press the key to resume" in capsys.readouterr().out
+
+
+async def test_the_hotkey_is_the_way_back_from_a_pause(capsys):
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+    d._wake_detected(0.6, "stop listening")
+    capsys.readouterr()
+
+    d._hotkey_pressed()
+    await asyncio.sleep(0.05)
+
+    assert d._asleep is False
+    assert d.wake.muted is False
+    assert "bol: listening again." in capsys.readouterr().out
+
+
+async def test_the_resume_line_is_printed_once(capsys):
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+    d._wake_detected(0.6, "stop listening")
+    capsys.readouterr()
+
+    d._hotkey_pressed()
+    d._hotkey_pressed()
+    await asyncio.sleep(0.05)
+
+    assert capsys.readouterr().out.count("listening again") == 1
+
+
+# ------------------------------------------------------------- cancelling
+
+
+async def test_a_click_cancels_a_recording_a_trigger_word_started():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, awake_s=60.0)
+    d.recorder = BlockingRecorder()
+
+    d._wake_detected(0.6, "type")
+    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
+    session = d._active_session
+    d._clicked()
+    await asyncio.sleep(0.05)
+
+    assert session.end_reason == "cancelled"
+    assert d.bridge.injected == []
+    assert d._pending_paste is False
+    # The window that would have reopened the microphone is shut with it.
+    assert d._awake() is False
+    assert d.hud.states[-1] == "idle"
+
+
+async def test_a_click_leaves_a_hotkey_recording_alone():
+    # Clicking to put the cursor somewhere while dictating is a thing people
+    # do on purpose, and the key in their other hand is the way out.
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+    d.recorder = BlockingRecorder()
+
+    d._hotkey_pressed()
+    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
+    session = d._active_session
+    d._clicked()
+    await asyncio.sleep(0.02)
+
+    assert session.stopped is False
+    assert d._wake_session is None
+    session.request_stop()
+    await asyncio.sleep(0.05)
+
+
+async def test_a_click_with_no_recording_running_does_nothing():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+
+    d._clicked()
+
+    assert d.recorder.calls == []
+
+
+async def test_another_app_coming_forward_cancels_a_trigger_recording(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
+    seen = ["com.apple.Terminal", "com.apple.Terminal", "com.google.Chrome"]
+
+    async def frontmost():
+        return seen.pop(0) if len(seen) > 1 else seen[0]
+
+    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, awake_s=60.0)
+    d.recorder = BlockingRecorder()
+
+    d._wake_detected(0.6, "type")
+    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
+    session = d._active_session
+    for _ in range(200):
+        await asyncio.sleep(0.005)
+        if session.stopped:
+            break
+
+    assert session.end_reason == "cancelled"
+    assert d.bridge.injected == []
+    assert d._awake() is False
+
+
+async def test_an_unreadable_frontmost_app_never_cancels_anything(monkeypatch):
+    # A missing Automation permission reads as "", and a permission Bol does
+    # not have must not cancel every recording it ever starts.
+    monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
+
+    async def frontmost():
+        return ""
+
+    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+    d.recorder = BlockingRecorder()
+
+    d._wake_detected(0.6, "type")
+    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
+    session = d._active_session
+    await asyncio.sleep(0.05)
+
+    assert session.stopped is False
+    session.request_stop()
+    await asyncio.sleep(0.05)
+
+
+async def test_a_frontmost_watcher_that_raises_never_ends_a_recording(monkeypatch):
+    monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
+
+    async def frontmost():
+        raise OSError("osascript is not available")
+
+    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+    d.recorder = BlockingRecorder()
+
+    d._wake_detected(0.6, "type")
+    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
+    session = d._active_session
+    await asyncio.sleep(0.05)
+
+    assert session.stopped is False
+    session.request_stop()
+    await asyncio.sleep(0.05)
+
+
+# ------------------------------------------------------ a model nobody has
+
+
+async def test_a_missing_keyword_model_costs_one_info_line(monkeypatch, tmp_path, caplog):
+    # Wake is on by default, so the first `bol run` on a machine nobody has
+    # set up must not open with a warning about a feature they never asked
+    # for. One line, and the hotkey.
+    monkeypatch.setattr(wake, "wake_available", lambda: True)
+    listener = WakeListener(Config().wake, lambda s, p: None, model_root=tmp_path)
+
+    with caplog.at_level(logging.DEBUG, logger="bol.wake"):
+        assert await listener.start() is False
+
+    assert "keyword model not downloaded" in caplog.text
+    assert "run `bol setup`" in caplog.text
+    assert "hotkey still works" in caplog.text
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
+async def test_a_daemon_with_no_keyword_model_still_arms_the_hotkey(monkeypatch, tmp_path):
+    monkeypatch.setattr(wake_model, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(wake, "wake_available", lambda: True)
+    d = Daemon(Config(), text_mode=False)
+    d.transcriber = FakeTranscriber([])
+    d.recorder = FakeRecorder(0)
+
+    await d._start_wake()
 
     assert d.wake is None
     assert d._awake() is False

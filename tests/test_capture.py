@@ -755,6 +755,52 @@ async def test_the_listen_window_names_its_ending(monkeypatch):
     assert session.end_reason == "window"
 
 
+async def test_a_session_pause_overrides_the_configured_one(monkeypatch):
+    # A "type" dictation pauses for thinking where a conversational turn does
+    # not, so the pause that ends it is the session's, not the config's.
+    gate = ScriptedGate([0.99, 0.99] + [0.05] * 20, tail=0.05)
+    recorder = Recorder(_cfg(silence_ms=96), gate=gate)
+    session = recorder.begin()
+    session.silence_ms = 320  # 10 blocks, not 3
+    _fake_sd(monkeypatch, _silence(40))
+
+    audio = await _record(recorder, session, until_silence=True)
+
+    assert session.end_reason == "silence"
+    # Two speech blocks then ten of silence, where the config would have cut
+    # it at three.
+    assert audio is not None
+    assert audio.size // BLOCK == 12
+
+
+async def test_a_session_window_overrides_the_configured_one(monkeypatch):
+    # A microphone a trigger word opened has to give up in seconds, not in
+    # the eight the hotkey's own hands-free reopen is allowed.
+    gate = ScriptedGate(tail=0.05)
+    recorder = Recorder(_cfg(listen_window_s=10), gate=gate)
+    session = recorder.begin()
+    session.window_ms = 320  # 10 blocks of nobody talking
+    _fake_sd(monkeypatch, _silence(60))
+
+    assert await _record(recorder, session, until_silence=True) is None
+    assert session.end_reason == "window"
+    assert gate.seen < 20  # it gave up at the session's window, not the config's
+
+
+async def test_a_cancelled_recording_keeps_its_name(monkeypatch):
+    # A click, or another app coming forward. The daemon reads this name and
+    # drops the audio rather than transcribing it.
+    gate = ScriptedGate([0.99] * 10, tail=0.99)
+    recorder = Recorder(_cfg(), gate=gate)
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(40))
+
+    session.request_stop(capture.CANCELLED)
+    await _record(recorder, session, until_silence=True)
+
+    assert session.end_reason == "cancelled"
+
+
 async def test_the_utterance_cap_names_its_ending(monkeypatch):
     # max_utterance_s ran out mid-sentence, which is the one ending that is
     # certainly not the end of what someone was saying.
@@ -788,5 +834,6 @@ async def test_every_reason_is_documented():
     # The daemon reads these names; a new one nobody wrote down is a rule
     # nobody applied.
     assert set(capture.END_REASONS) == {
-        "release", "tap", "silence", "window", "max", "stop",
+        "release", "tap", "silence", "window", "max", "cancelled", "stop",
     }
+    assert capture.CANCELLED in capture.END_REASONS

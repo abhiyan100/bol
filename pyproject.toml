@@ -29,16 +29,29 @@ dependencies = [
     # whether a hands-free turn ends when you stop talking, and an energy
     # gate cannot tell a keyboard from a syllable.
     "pysilero-vad>=3.4; platform_machine == 'arm64'",
+    # The keyword listener: "type", "send it", "hey Bol". Base dependencies
+    # rather than an extra, because always-on listening is what Bol does out
+    # of the box now, and a trigger word that needs a second install is a
+    # trigger word most people never hear about. sherpa-onnx is a 2 MB wheel
+    # plus its 9.5 MB core (which bundles onnxruntime), and it is loaded only
+    # in the wake child process, never in the daemon. sentencepiece turns a
+    # trigger word into the BPE pieces the keyword model can actually emit;
+    # without it a phrase can only be guessed at.
+    "sherpa-onnx>=1.13; platform_machine == 'arm64'",
+    # Named explicitly, and it has to be: sherpa-onnx's sdist metadata does
+    # not declare it, so a resolver reading that (uv does) installs a
+    # sherpa_onnx whose .so cannot find libonnxruntime.dylib. Without this
+    # line the keyword listener never imports.
+    "sherpa-onnx-core>=1.13; platform_machine == 'arm64'",
+    "sentencepiece>=0.2; platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]
 stt = ["parakeet-mlx>=0.3"]
 llm = ["mlx-lm>=0.24"]
-# "hey Bol". sherpa-onnx is a 2 MB wheel plus its 9.5 MB core (which bundles
-# onnxruntime), and it is loaded only in the wake child process, never in the
-# daemon. sentencepiece turns a wake phrase into the BPE pieces the keyword
-# model can actually emit; without it a phrase can only be guessed at.
-wake = ["sherpa-onnx>=1.13", "sentencepiece>=0.2"]
+# Kept as an empty alias so `bol[stt,llm,wake]` in an old README, an old
+# script, or an old shell history keeps resolving. Wake is base now.
+wake = []
 # misaki's G2P needs spacy + friends; we list them directly instead of
 # misaki[en] because that extra drags in torch (~500MB) via
 # spacy-curated-transformers, which the mlx pipeline never uses.

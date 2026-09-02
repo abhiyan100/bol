@@ -92,18 +92,48 @@ VAD_MODES = ("silero", "energy")
 
 @dataclass
 class WakeConfig:
-    # "hey Bol", the hands-free way to start a recording. Off by default:
-    # it is the one feature that keeps the microphone open all day, and that
-    # is a decision to make on purpose rather than inherit.
-    enabled: bool = False
-    # What to listen for. Bol matches the spellings a speech model actually
-    # produces for each phrase (for "hey bol": "hey bowl" and "hey ball" too).
+    # The trigger words, listened for from the moment Bol starts. On by
+    # default: this is how Bol is meant to be used, and a microphone you have
+    # to switch on is one most people never switch on. false turns the
+    # always-on microphone off and leaves the hotkey exactly as it was.
+    enabled: bool = True
+    # Start a conversation: a recording with the usual auto-send rules. Bol
+    # matches the spellings a speech model actually produces for each phrase
+    # (for "hey bol": "hey bowl" and "hey ball" too).
     phrases: list = field(default_factory=lambda: ["hey bol"])
+    # Start dictation: everything said until you pause for pause_ms is pasted
+    # where the cursor is, and nothing is submitted until you say a send
+    # phrase. One word, so it also fires inside "what type of file" and "the
+    # prototype": see type_threshold for what that costs and what it does not.
+    type_phrases: list = field(default_factory=lambda: ["type"])
+    # Press Enter on text Bol has already pasted. Nothing pasted, nothing
+    # happens. Left at this default, a [commands] send list wins instead, so
+    # remapping "send it" to "ship it" remaps the trigger word too.
+    send_phrases: list = field(default_factory=lambda: ["send it", "send", "enter"])
+    # Wipe the input line, when there is a pending paste to wipe.
+    cancel_phrases: list = field(default_factory=lambda: ["scratch that", "close"])
+    # Stop listening for trigger words until the next hotkey press. Same rule
+    # as send_phrases: a [commands] sleep list wins over this default.
+    sleep_phrases: list = field(default_factory=lambda: ["stop listening"])
     # Trigger probability. Lower hears more, including the TV. Measured
-    # against two macOS voices: 0.12 wakes on both, and a 20 second paragraph
-    # full of "ball", "bowl" and "hello" wakes on none.
+    # against two macOS voices: 0.12 hears every trigger word, and 51 seconds
+    # of speech full of "ball", "bowl", "close" and "send" false-fires on none
+    # of them except "type".
     threshold: float = 0.12
-    # After a wake or a tap, the next thing you say needs no wake phrase.
+    # "type" only, and 0 means "use threshold". Measured: raising this does
+    # not buy precision. At 0.30 the real "type add a login test" stops
+    # firing for one of the two test voices while all eight false positives
+    # inside "prototype"/"what type of file" survive, because a keyword
+    # spotter scores the same sounds the same way wherever they sit in a
+    # sentence. If false dictation bothers you, change type_phrases to
+    # something longer ("bol type", "dictate") rather than raising this.
+    type_threshold: float = 0.0
+    # How long a pause ends a "type" dictation and pastes it. Longer than the
+    # [audio] silence_ms the conversation flow uses: dictating a prompt has
+    # thinking pauses in it, and the user asked for three seconds.
+    pause_ms: int = 3000
+    # After a wake, a dictation or a tap, the next thing you say needs no
+    # trigger word. 0 means only trigger words ever start anything.
     awake_s: float = 60.0
 
 
@@ -323,6 +353,27 @@ def validate_wake(wake: WakeConfig) -> None:
             f"[wake] threshold must be above 0 and at most 1, not {threshold}. "
             "Lower hears more, including the TV."
         )
+    # 0 is "use threshold", so this one is allowed to be zero and nothing else.
+    try:
+        type_threshold = float(wake.type_threshold)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"[wake] type_threshold must be a number, not {wake.type_threshold!r}."
+        )
+    if not 0.0 <= type_threshold <= 1.0:
+        raise ValueError(
+            f"[wake] type_threshold must be between 0 and 1, not {type_threshold}. "
+            "0 means use the shared threshold."
+        )
+    try:
+        pause = float(wake.pause_ms)
+    except (TypeError, ValueError):
+        raise ValueError(f"[wake] pause_ms must be a number, not {wake.pause_ms!r}.")
+    if pause <= 0:
+        raise ValueError(
+            f"[wake] pause_ms must be above 0, not {pause}. It is how long a "
+            "pause ends a dictation and pastes it."
+        )
     try:
         awake = float(wake.awake_s)
     except (TypeError, ValueError):
@@ -357,18 +408,30 @@ submit = "auto"        # auto: dictation submits itself when you tap again or re
 auto_send_min_words = 3  # shorter than this is pasted, not sent; "send it" still submits
 
 [wake]
-# "hey Bol", so you can start talking without reaching for the key. Off by
-# default, and here is what turning it on actually does.
+# The trigger words, listened for from the moment Bol starts, so there is no
+# key to press. Say "type" and talk; pause three seconds and it is pasted.
+# Say "send it" and it is sent. Say "hey Bol" for the conversation flow.
+# Here is what leaving this on actually does.
 #   Wake mode keeps the microphone open and runs a small keyword model on
 #   your Mac. Nothing is recorded or sent anywhere. Expect the occasional
 #   false wake from TV or conversation; a false wake costs a Listening pill,
-#   and nothing is sent unless you say three words.
+#   and nothing is sent unless you say a send phrase.
 # Turn your wifi off and try it: it still works. `bol setup` downloads the
-# 5 MB keyword model when this is true.
-enabled = false
-phrases = ["hey bol"]  # Bol also listens for "hey bowl" and "hey ball"
+# 5 MB keyword model. Set enabled = false to close the microphone and keep
+# the hotkey, which works the same either way.
+enabled = true
+phrases = ["hey bol"]              # Bol also listens for "hey bowl" and "hey ball"
+type_phrases = ["type"]            # starts dictation; pause pause_ms and it is pasted
+send_phrases = ["send it", "send", "enter"]  # presses Enter on a pending paste
+cancel_phrases = ["scratch that", "close"]   # wipes a pending paste
+sleep_phrases = ["stop listening"] # pause Bol; press the hotkey to resume
+pause_ms = 3000        # a pause this long ends a "type" dictation and pastes it
 threshold = 0.12       # trigger probability; lower hears more, including the TV
-awake_s = 60           # after a wake or a tap, the next thing you say needs no phrase
+# type_threshold = 0.0 # "type" only; 0 = use threshold. Raising it costs the real
+#                      # "type ..." before it costs the one inside "prototype", so
+#                      # if false dictation bothers you, change type_phrases instead.
+awake_s = 60           # after a trigger word or a tap, the next thing you say needs none.
+                       # 0 = only trigger words ever start anything.
 
 # Remap any voice command to whatever you like. Unset keys keep defaults.
 # [commands]

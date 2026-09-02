@@ -1,21 +1,34 @@
-"""Opt-in "hey Bol": a wake phrase that starts a recording without the hotkey.
+"""The trigger words: "type", "send it", "hey Bol", and the ones that stop it.
 
-Off by default, and here is the honest version of what turning it on costs.
-Wake mode keeps the microphone open and runs a small keyword model on your
-Mac; nothing is recorded or sent anywhere; expect the occasional false wake
-from TV or conversation; a false wake costs a Listening pill and nothing is
-sent unless you say three words. Turn the wifi off and it still works.
+On by default, and here is the honest version of what that costs. Wake mode
+keeps the microphone open and runs a small keyword model on your Mac; nothing
+is recorded or sent anywhere; expect the occasional false trigger from TV or
+conversation, and "type" in particular also fires inside "what type of file"
+and "the prototype". A false trigger costs a Listening pill and a paste that
+waits; nothing reaches Claude until a send phrase presses Enter. Turn the wifi
+off and it still works.
+
+Four kinds of trigger word, and the daemon does something different with each:
+
+  WAKE   "hey bol"        a recording with the usual auto-send rules
+  TYPE   "type"           dictation: pasted after a pause, never submitted
+  SEND   "send it"        Enter on what is already pasted; no recording
+  CANCEL "scratch that"   wipe what is already pasted; no recording
+  SLEEP  "stop listening" stop hearing trigger words until the next keypress
+
+The child spotter knows none of that. It is handed spellings and reports which
+one matched; the kind is this module's table and the daemon's to act on.
 
 This module is the daemon's half: it owns the child process, feeds it the
 blocks the microphone is already producing, and turns a line of its stdout
-into a callback. Nothing here imports sherpa-onnx or onnxruntime, so a daemon
-built without the wake extra pays nothing for this file existing.
+into a callback. Nothing here imports sherpa-onnx or onnxruntime, so the
+daemon process never loads the keyword model or its runtime.
 
 Two more pieces live here because they are wake's rules and the daemon just
-applies them: which spellings of a phrase count as the same wake (the speech
-model hears "hey bowl" and "hey ball" at least as often as "hey bol"), and how
-the phrase is taken back off the front of the transcript before the grammar
-sees it.
+applies them: which spellings of a phrase count as the same trigger (the
+speech model hears "hey bowl" and "hey ball" at least as often as "hey bol"),
+and how the trigger word is taken back off the front of the transcript before
+the grammar sees it.
 """
 
 from __future__ import annotations
@@ -50,18 +63,26 @@ log = logging.getLogger("bol.wake")
 
 __all__ = [
     "WakeListener",
+    "CANCEL",
     "DISK_BYTES",
     "DOWNLOAD_BYTES",
     "FRAME_BYTES",
     "FRAME_DTYPE",
     "FRAME_SAMPLES",
+    "KINDS",
     "MODEL_NAME",
     "MODEL_URL",
+    "SEND",
+    "SLEEP",
     "SPELLINGS",
+    "TYPE",
+    "WAKE",
     "all_spellings",
     "UNMUTE_DELAY_S",
     "download_model",
     "human_size",
+    "keyword_map",
+    "lead_phrases",
     "missing_files",
     "model_dir",
     "model_files",
@@ -69,8 +90,25 @@ __all__ = [
     "parse_wake_line",
     "spellings",
     "strip_wake_phrase",
+    "trigger_phrases",
     "wake_available",
 ]
+
+# What a trigger word means. The child reports a spelling; the daemon looks it
+# up here and does one of five very different things with it.
+WAKE, TYPE, SEND, CANCEL, SLEEP = "wake", "type", "send", "cancel", "sleep"
+
+# Kind -> the WakeConfig field holding its phrases, in the order a spelling
+# claimed by two kinds is resolved: whoever comes first keeps it. WAKE leads
+# because "hey bol" is the phrase people configure; SLEEP trails because it is
+# the one whose default a [commands] list is most likely to widen.
+KINDS = (
+    (WAKE, "phrases", None),
+    (TYPE, "type_phrases", None),
+    (SEND, "send_phrases", "send"),
+    (CANCEL, "cancel_phrases", None),
+    (SLEEP, "sleep_phrases", "sleep"),
+)
 
 # Bol speaks, and 500 ms later the wake listener is allowed to hear again.
 # Without the tail the room's reverb of Bol's own last word is still arriving
@@ -111,6 +149,102 @@ def all_spellings(phrases) -> list[str]:
     return out
 
 
+# ------------------------------------------------------------------ triggers
+
+
+def _clean(value) -> list[str]:
+    """A configured phrase list, lower-cased, de-duplicated, blanks dropped.
+
+    Everything that reads config comes through here, so a stray "  Type  " in
+    a TOML file is the same keyword as "type" rather than a second one the
+    daemon's phrase table would never match.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for item in value:
+        phrase = " ".join(str(item).lower().split())
+        if phrase and phrase not in out:
+            out.append(phrase)
+    return out
+
+
+def _untouched(field: str, phrases: list[str]) -> bool:
+    """Is this list still the default nobody edited?
+
+    Imported here rather than at module scope: bol.config is cheap, but this
+    file is imported by `bol doctor` on machines with no wake model and no
+    reason to build a Config.
+    """
+    from ..config import WakeConfig
+
+    return phrases == _clean(getattr(WakeConfig(), field, None))
+
+
+def trigger_phrases(cfg, commands=None) -> dict[str, list[str]]:
+    """kind -> the phrases to listen for, as a person would say them.
+
+    A [commands] list wins over a wake default the user never touched, so
+    remapping send to "ship it" in the grammar remaps the trigger word with
+    it and the two can never disagree about what sending is called. A wake
+    list the user did edit is theirs, and is left exactly as written.
+    """
+    out: dict[str, list[str]] = {}
+    for kind, field, command in KINDS:
+        phrases = _clean(getattr(cfg, field, None))
+        if command and _untouched(field, phrases):
+            override = _clean((commands or {}).get(command))
+            if override:
+                phrases = override
+        out[kind] = phrases
+    return out
+
+
+def keyword_map(cfg, commands=None) -> dict[str, str]:
+    """spelling -> kind, in the order the child is given the keywords.
+
+    One spelling is one keyword however many kinds claim it, and the first
+    kind in KINDS keeps it: the child reports a spelling and nothing else, so
+    a spelling that meant two things would be a coin toss at runtime.
+    """
+    out: dict[str, str] = {}
+    for kind, phrases in trigger_phrases(cfg, commands).items():
+        for spelling in all_spellings(phrases):
+            out.setdefault(spelling, kind)
+    return out
+
+
+def lead_phrases(cfg, commands=None) -> list[str]:
+    """One phrase per kind, as written: what `bol doctor` tells you to say.
+
+    Not every spelling. "hey bowl" is in the keyword file because the decoder
+    produces it, not because anyone should be told to say it.
+    """
+    phrases = trigger_phrases(cfg, commands)
+    return [phrases[kind][0] for kind, _f, _c in KINDS if phrases.get(kind)]
+
+
+def keyword_args(cfg, commands=None) -> list[str]:
+    """The --phrase arguments for the child, per-phrase threshold and all.
+
+    Only "type" can carry its own threshold, and only when someone set one:
+    measured against `say`, raising it costs the real "type add a login test"
+    before it costs the "type" inside "prototype", so the default leaves every
+    keyword on the shared threshold.
+    """
+    try:
+        type_threshold = float(getattr(cfg, "type_threshold", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        type_threshold = 0.0
+    args: list[str] = []
+    for spelling, kind in keyword_map(cfg, commands).items():
+        if kind == TYPE and type_threshold > 0.0:
+            args += ["--phrase", f"{spelling}={type_threshold:g}"]
+        else:
+            args += ["--phrase", spelling]
+    return args
+
+
 def wake_available() -> bool:
     """Is the wake extra importable? Checked without importing it.
 
@@ -120,8 +254,13 @@ def wake_available() -> bool:
     return find_spec("sherpa_onnx") is not None and find_spec("sentencepiece") is not None
 
 
-def parse_wake_line(line: str) -> float | None:
-    """Read one line of the child's stdout, or None if it is not a detection.
+def parse_wake_line(line: str) -> tuple[float, str] | None:
+    """One line of the child's stdout as (threshold, phrase), or None.
+
+    The phrase is what the daemon acts on: it is the spelling that matched,
+    and the only thing that says whether this was "type", "send it" or "hey
+    bol". A line with no phrase on it is still a detection, and is treated as
+    a plain wake, because that is what the format used to mean.
 
     The child is another process writing down a pipe; a partial line, a
     library's stray print, or a version that grew a new field all have to be
@@ -133,9 +272,10 @@ def parse_wake_line(line: str) -> float | None:
     if len(parts) < 2 or parts[0] != "wake":
         return None
     try:
-        return float(parts[1])
+        score = float(parts[1])
     except ValueError:
         return None
+    return score, " ".join(parts[2:]).strip().lower()
 
 
 def strip_wake_phrase(text: str, phrases=("hey bol",)) -> str:
@@ -189,11 +329,13 @@ class WakeListener:
         cfg,
         on_wake,
         *,
+        commands=None,
         model_root: Path | None = None,
         spawn=None,
         clock=time.monotonic,
     ) -> None:
         self.cfg = cfg
+        self._commands = commands or {}
         self._on_wake = on_wake
         self._root = Path(model_root) if model_root is not None else model_dir()
         # Injected in tests; None means "really start a child process".
@@ -214,18 +356,21 @@ class WakeListener:
         if self._spawn is None:
             if not wake_available():
                 log.warning(
-                    "[wake] enabled = true, but the wake extra is not installed. "
-                    "Install it with: %s",
-                    install_hint("stt,llm,wake"),
+                    "[wake] enabled = true, but sherpa-onnx is not installed. "
+                    "Reinstall Bol with: %s",
+                    install_hint("stt,llm"),
                 )
                 return False
             if not model_present(self._root):
-                log.warning(
-                    "[wake] enabled = true, but the keyword model is missing "
-                    "from %s (%s). Run `bol setup`.",
-                    self._root,
-                    ", ".join(missing_files(self._root)),
+                # Info, not a warning, and one line: wake is on by default
+                # now, so the very first `bol run` on a machine that has not
+                # been set up would otherwise open with a scolding about a
+                # feature the user never asked for. The hotkey works.
+                log.info(
+                    "wake: keyword model not downloaded, run `bol setup`; "
+                    "hotkey still works"
                 )
+                log.debug("missing from %s: %s", self._root, ", ".join(missing_files(self._root)))
                 return False
         try:
             self._proc = await self._open()
@@ -241,8 +386,8 @@ class WakeListener:
         self._spawn_task(self._pump_frames())
         self._spawn_task(self._read_wakes())
         log.info(
-            "wake phrase armed: %s (threshold %.2f)",
-            ", ".join(all_spellings(self.cfg.phrases)) or "none",
+            "listening for: %s (threshold %.2f)",
+            ", ".join(lead_phrases(self.cfg, self._commands)) or "none",
             float(self.cfg.threshold),
         )
         return True
@@ -275,9 +420,7 @@ class WakeListener:
             str(self._root),
             "--threshold",
             str(float(self.cfg.threshold)),
-        ]
-        for phrase in all_spellings(self.cfg.phrases):
-            argv += ["--phrase", phrase]
+        ] + keyword_args(self.cfg, self._commands)
         return await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -388,14 +531,15 @@ class WakeListener:
             line = await stdout.readline()
             if not line:
                 return
-            score = parse_wake_line(line.decode("utf-8", "replace"))
-            if score is None:
+            hit = parse_wake_line(line.decode("utf-8", "replace"))
+            if hit is None:
                 continue
             if self.muted:
                 # Bol started speaking while this line was in the pipe.
                 continue
+            score, phrase = hit
             try:
-                self._on_wake(score)
+                self._on_wake(score, phrase)
             except Exception as exc:  # noqa: BLE001 - a callback must not end the reader
                 log.warning("wake callback failed: %s", exc)
 

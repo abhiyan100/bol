@@ -556,14 +556,28 @@ def probe_weights(cfg) -> list[tuple[str, str, str]]:
     return rows or [(INFO, "models: none needed by this config", "")]
 
 
-def probe_wake(cfg) -> list[tuple[str, str, str]]:
-    """"hey Bol": the extra, the model, and what it is listening for.
+def wake_heard(cfg) -> str:
+    """The trigger words, as a person would say them, for one printed line."""
+    from .wake import lead_phrases
 
-    One informational row when wake is off, because a feature nobody switched
-    on has no failures to report and should not add noise to `bol doctor`.
+    return ", ".join(lead_phrases(cfg.wake, cfg.commands)) or "nothing"
+
+
+# What always-on listening actually does, in the one place a user is looking
+# for it. Not a warning: it is the cost of the feature, stated once.
+MIC_NOTE = (
+    "the microphone indicator stays on while Bol runs; nothing is recorded "
+    "or sent anywhere"
+)
+
+
+def probe_wake(cfg) -> list[tuple[str, str, str]]:
+    """The trigger words: the package, the model, and what Bol listens for.
+
+    One informational row when they are switched off, because a feature
+    nobody is using has no failures to report and should not add noise.
     """
     from .wake import (
-        all_spellings,
         human_size,
         missing_files,
         model_dir,
@@ -572,15 +586,17 @@ def probe_wake(cfg) -> list[tuple[str, str, str]]:
     )
 
     if not cfg.wake.enabled:
-        return [(INFO, 'wake phrase: off ([wake] enabled = false)', "")]
+        return [
+            (INFO, "trigger words: off ([wake] enabled = false); the hotkey still works", "")
+        ]
     rows = []
     if wake_available():
-        rows.append((OK, "sherpa-onnx (wake phrase)", ""))
+        rows.append((OK, "sherpa-onnx (trigger words)", ""))
     else:
         rows.append((
             BAD,
             "sherpa-onnx not installed, so [wake] enabled = true does nothing",
-            install_hint("stt,llm,wake"),
+            install_hint("stt,llm"),
         ))
     root = model_dir()
     if model_present(root):
@@ -592,13 +608,15 @@ def probe_wake(cfg) -> list[tuple[str, str, str]]:
             f"keyword model: not in {root} ({', '.join(missing_files(root))})",
             "run `bol setup` to fetch it",
         ))
-    heard = ", ".join(all_spellings(cfg.wake.phrases)) or "nothing"
     rows.append((
         INFO,
-        f"listening for: {heard} (threshold {float(cfg.wake.threshold):g}, "
-        f"awake for {float(cfg.wake.awake_s):g}s after a wake or a tap)",
+        f"listening for: {wake_heard(cfg)} "
+        f"(threshold {float(cfg.wake.threshold):g}, "
+        f"{float(cfg.wake.pause_ms) / 1000:g}s pause pastes a dictation, "
+        f"awake for {float(cfg.wake.awake_s):g}s after anything you say)",
         "",
     ))
+    rows.append((INFO, MIC_NOTE, ""))
     return rows
 
 
@@ -937,11 +955,11 @@ def _setup_models(cfg) -> bool:
 
 
 def _setup_wake(cfg) -> bool:
-    """Fetch the keyword model, but only if wake mode is switched on.
+    """Fetch the keyword model, unless the trigger words are switched off.
 
-    Same shape as the model budget above: say what it costs, then spend it.
-    Nobody who left [wake] enabled = false pays a download for a feature they
-    did not ask for.
+    Same shape as the model budget above: say what it costs, then spend it,
+    then say what Bol will be listening for. Nobody who set
+    [wake] enabled = false pays a download for a microphone they closed.
     """
     from .wake import (
         DISK_BYTES,
@@ -955,30 +973,36 @@ def _setup_wake(cfg) -> bool:
     )
 
     if not cfg.wake.enabled:
-        print('wake phrase: off ([wake] enabled = false in your config).\n')
+        print(
+            "trigger words: off ([wake] enabled = false in your config). "
+            "The hotkey works as before.\n"
+        )
         return True
     root = model_dir()
+    ok = True
     if model_present(root):
-        print(f"wake phrase: keyword model already at {root}\n")
-        return True
-    if not wake_available():
+        print(f"trigger words: keyword model already at {root}")
+    elif not wake_available():
         print(
-            "wake phrase: [wake] enabled = true, but sherpa-onnx is not "
-            f"installed. {install_hint('stt,llm,wake')}\n"
+            "trigger words: [wake] enabled = true, but sherpa-onnx is not "
+            f"installed. {install_hint('stt,llm')}\n"
         )
         return False
-    print(
-        f"wake phrase: downloading {MODEL_NAME}\n"
-        f"  {human_size(DOWNLOAD_BYTES)} to download, about "
-        f"{human_size(DISK_BYTES)} kept in {root}"
-    )
-    try:
-        download_model(root)
-    except Exception as exc:
-        print(f"bol: could not download the keyword model ({exc}).\n")
-        return False
-    print("wake phrase: keyword model ready.\n")
-    return True
+    else:
+        print(
+            f"trigger words: downloading {MODEL_NAME}\n"
+            f"  {human_size(DOWNLOAD_BYTES)} to download, about "
+            f"{human_size(DISK_BYTES)} kept in {root}"
+        )
+        try:
+            download_model(root)
+        except Exception as exc:
+            print(f"bol: could not download the keyword model ({exc}).\n")
+            return False
+        print("trigger words: keyword model ready.")
+    print(f"  listening for: {wake_heard(cfg)}")
+    print(f"  {MIC_NOTE}\n")
+    return ok
 
 
 def _setup_hooks(cfg) -> None:

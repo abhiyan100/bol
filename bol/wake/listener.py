@@ -96,6 +96,23 @@ def _lines(path: Path) -> list[str]:
     return Path(path).read_text(encoding="utf-8").splitlines()
 
 
+def parse_phrase_arg(value: str) -> tuple[str, float | None]:
+    """One --phrase argument as (spelling, threshold or None).
+
+    The form is "send it" or "type=0.3". An "=" cannot occur in a phrase the
+    BPE model has tokens for, which is what makes it safe to overload one
+    repeatable option rather than keeping two lists in step.
+    """
+    spelling, sep, raw = str(value).rpartition("=")
+    if not sep:
+        return " ".join(str(value).lower().split()), None
+    try:
+        return " ".join(spelling.lower().split()), float(raw)
+    except ValueError:
+        # Not a threshold, so it was never a suffix. Use the whole thing.
+        return " ".join(str(value).lower().split()), None
+
+
 def keywords_text(
     phrases,
     threshold: float,
@@ -106,15 +123,22 @@ def keywords_text(
     """The keyword file sherpa-onnx reads, built from the spellings.
 
     Every line carries its own score and threshold rather than relying on the
-    spotter-wide defaults, so one phrase can later be loosened without moving
-    the others.
+    spotter-wide defaults, so one phrase can be loosened or tightened without
+    moving the others: an item may be a spelling, or a (spelling, threshold)
+    pair for the ones that need their own.
     """
-    seen = []
+    seen: dict[str, str] = {}
     for phrase in phrases:
-        encoded = tokenize(phrase, bpe_model, tokens)
-        if encoded not in seen:
-            seen.append(encoded)
-    return "".join(f"{line} :{score:g} #{threshold:g}\n" for line in seen)
+        if isinstance(phrase, (tuple, list)):
+            spelling, own = phrase[0], phrase[1]
+        else:
+            spelling, own = phrase, None
+        encoded = tokenize(spelling, bpe_model, tokens)
+        if encoded in seen:
+            continue  # two spellings the model cannot tell apart are one keyword
+        level = threshold if own is None else float(own)
+        seen[encoded] = f"{encoded} :{score:g} #{level:g}\n"
+    return "".join(seen.values())
 
 
 # ------------------------------------------------------------------- spotter
@@ -208,7 +232,7 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     root = Path(args.model_dir) if args.model_dir else model_dir()
-    phrases = args.phrase or ["hey bol"]
+    phrases = [parse_phrase_arg(value) for value in args.phrase] or [("hey bol", None)]
     try:
         if not model_present(root):
             raise WakeError(

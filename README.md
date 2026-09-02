@@ -32,8 +32,9 @@ bol run
 Requires macOS on Apple Silicon, [Claude Code](https://code.claude.com), and
 [uv](https://docs.astral.sh/uv/). Setup downloads about 3 GB of models
 (speech 2.3 GB, summarizer 0.6 GB, cleanup 0.2 GB), cached after the first
-time. Add `,kokoro` to the extras for a neural voice (0.3 GB more), or
-`,wake` for the "hey Bol" wake phrase (5 MB).
+time. Add `,kokoro` to the extras for a neural voice (0.3 GB more). The
+always-on trigger words ("type", "send it", "hey Bol") are included: setup
+fetches their 5 MB keyword model.
 
 ## Why Bol
 
@@ -119,7 +120,7 @@ never touch the terminal: only the final, full-accuracy decode is pasted. Voice 
 | "**interrupt**" / "**stop claude**" | Escape, stops the running turn |
 | "...**clean it up and send it**" | strips fillers and stutters, fixes "auth dot py" to `auth.py`, then submits |
 | "**say that again**" | re-speaks the last reply |
-| "**stop listening**" | sleep until the next hotkey press |
+| "**stop listening**" / "**pause**" | pause Bol, ear and all, until the next hotkey press |
 
 Every phrase is yours to remap:
 
@@ -141,13 +142,30 @@ Running several Claude Code sessions? Bol narrates the first one it hears
 from and tells you when it ignores another. Set `[server] follow = "all"` to
 hear every session.
 
-Want no key at all? Install the `wake` extra, set `[wake] enabled = true`,
-run `bol setup` once to fetch the 5 MB keyword model, and say **"hey Bol"**
-before your prompt. Bol stays awake for a minute after each exchange, so
-follow-ups need no wake word. Wake mode keeps the microphone open and runs
-a small keyword model on your Mac; nothing is recorded or sent anywhere.
-Expect the occasional false wake from a TV or a conversation: it costs a
-Listening pill, and nothing is sent unless you say three words.
+### No key at all
+
+Bol listens from the moment it starts. Say **"type"** and talk; pause for
+three seconds and what you said is pasted where the cursor is. Say
+**"send it"** and it goes. Say **"hey Bol"** for the conversation flow above
+(a recording with the usual auto-send rules), **"scratch that"** to wipe a
+paste, and **"stop listening"** to pause Bol until you press the key. For a
+minute after anything you say, the next sentence needs no trigger word at
+all; set `awake_s = 0` if you want only trigger words to ever start
+anything. A recording that started itself also stops itself: click anywhere,
+switch apps, or say nothing for three seconds, and it is thrown away.
+
+This keeps the microphone open and runs a 5 MB keyword model on your Mac.
+Nothing is recorded or sent anywhere, and the macOS microphone indicator
+stays on for as long as Bol runs, which is the honest version of what that
+means. Expect the occasional false trigger from a TV or a conversation, and
+expect "type" in particular to fire inside "what type of file" and "the
+prototype": a keyword spotter scores the same sounds the same way wherever
+they sit in a sentence. A false trigger costs a Listening pill and a paste
+that waits; nothing reaches Claude until you say a send phrase. Change
+`type_phrases` to something longer if it bothers you.
+
+`[wake] enabled = false` turns the always-on microphone off and leaves the
+hotkey exactly as it was.
 
 No mic handy? `bol talk` gives the identical loop over typed text. Prefer
 focus-independent injection? Run Claude inside tmux and Bol auto-switches to
@@ -179,9 +197,15 @@ vad = "silero"               # decides when you stopped talking; "energy" = fall
 words = ["Abhiyan", "Kokoro", "pyproject"]   # names Bol should spell right
 
 [wake]
-enabled = false              # "hey Bol" instead of a key; needs the wake extra
-phrases = ["hey bol"]
-awake_s = 60                 # follow-ups need no wake word for this long
+enabled = true               # always-on trigger words; false = hotkey only
+phrases = ["hey bol"]        # conversation flow
+type_phrases = ["type"]      # dictation: pasted after a pause, never sent
+send_phrases = ["send it", "send", "enter"]  # Enter on a pending paste
+cancel_phrases = ["scratch that", "close"]   # wipe a pending paste
+sleep_phrases = ["stop listening"]           # pause; the key resumes
+pause_ms = 3000              # a pause this long ends a dictation and pastes it
+awake_s = 60                 # follow-ups need no trigger word for this long;
+                             # 0 = only trigger words ever start anything
 
 [ui]
 pill = true                  # on-screen state pill; false = sound cues only
