@@ -1325,9 +1325,14 @@ def _one_way(utterances=0, texts=()):
     return d
 
 
-def test_one_way_startup_builds_nothing_that_speaks():
+def test_one_way_startup_builds_nothing_that_speaks(monkeypatch):
     # Not "switched off at the point of use": never built, so no voice model,
     # no summarizer and no mlx_lm.server on a 16 GB Mac.
+    # The cleaner is faked: on a machine without mlx-lm (CI) build_cleaner
+    # returns None, and this test is about wiring, not about the extra.
+    import bol.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod, "build_cleaner", lambda cfg: object())
     cfg = Config()
     cfg.talk_back = False
 
