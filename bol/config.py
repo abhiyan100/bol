@@ -210,6 +210,13 @@ class BridgeConfig:
     # Focused mode: bundle ids allowed to receive injection (empty = built-in
     # terminal allowlist). Guard against dictating into the wrong app.
     allowed_apps: list = field(default_factory=list)
+    # Focused mode: let dictation land wherever the cursor is (Notes, Slack, a
+    # browser box), not only in a terminal or an IDE. Enter is a separate
+    # question and stays gated: Bol presses it by itself only in a window
+    # running Claude, and anywhere else only when the user asked for it in
+    # words ("send it", "go ahead"). false is the old behavior, where the
+    # allowlist above applies to every keystroke and every paste.
+    anywhere: bool = True
 
 
 @dataclass
@@ -236,6 +243,11 @@ class UiConfig:
     sounds: bool = True
     # Which edge of the active screen the pill sits on.
     position: str = "top"  # top | bottom
+    # Whether the pill spells out what it is doing beside the dots. Off: the
+    # capsule is a mark and five dots, which is the whole state at a glance
+    # and nothing to read. Errors still reach you either way, in the terminal
+    # and out loud.
+    text: bool = False
 
 
 UI_POSITIONS = ("top", "bottom")
@@ -317,6 +329,11 @@ def _one_of(label: str, value: object, choices: tuple[str, ...]) -> None:
         )
 
 
+def _flag(label: str, value: object) -> None:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be true or false, not {value!r}.")
+
+
 def validate_config(cfg: Config) -> None:
     """Reject config values Bol cannot act on.
 
@@ -327,6 +344,9 @@ def validate_config(cfg: Config) -> None:
     _one_of("[hotkey] submit", cfg.hotkey.submit, SUBMIT_MODES)
     _one_of("[ui] position", cfg.ui.position, UI_POSITIONS)
     _one_of("[audio] vad", cfg.audio.vad, VAD_MODES)
+    # anywhere = "false" is a string, and a non-empty string is truthy, so a
+    # quoted value would silently mean the opposite of what it says.
+    _flag("[bridge] anywhere", cfg.bridge.anywhere)
     validate_wake(cfg.wake)
 
 
@@ -396,6 +416,7 @@ hands_free = false
 pill = true            # the on-screen pill that shows what Bol is doing
 sounds = true          # audible blips when listening starts/stops
 position = "top"       # which edge the pill sits on: "top" | "bottom"
+text = false           # also spell the state out beside the dots
 
 [hotkey]
 mode = "auto"          # tap or hold, whichever you did | "push_to_talk" | "toggle"
@@ -485,6 +506,10 @@ user_name = ""         # your name, spoken in replies
 [bridge]
 mode = "auto"          # auto | focused (paste into front terminal) | tmux
 pane = ""              # tmux mode: pane id like "%3"; empty auto-discovers
+anywhere = true        # dictation lands wherever the cursor is: Notes, Slack, a browser
+                       # box. Bol presses Enter by itself only when the front window is
+                       # running Claude; saying "send it" presses it wherever you are.
+                       # false = terminals and IDEs only, for pastes and keys alike.
 
 [server]
 port = 8770

@@ -62,19 +62,20 @@ Good tools; they stop at the input box.
  mic -> Parakeet STT (local)           |                | Notification hooks
         |                              |                v
         v                        +------------- bol daemon -------------+
- command grammar ----------------|  bridge (focused terminal / tmux)     |
+ command grammar ----------------|  bridge (focused app / tmux)          |
  "send it" / "type ..." / "close"|  hook server on 127.0.0.1:8770         |
                                  |  summarizer (local LLM, template)     |
                                  |  TTS (macOS say, or local Kokoro)     |
                                  +---------------------------------------+
 ```
 
-- **You keep your normal Claude Code TUI.** Bol pastes into the terminal
-  window you are looking at: Terminal, iTerm2, Ghostty, Warp, Kitty,
-  Alacritty, WezTerm, and the integrated terminals in VS Code, Cursor, Zed
-  and JetBrains IDEs. Text lands the moment you stop speaking. Bol refuses to
-  type into anything that is not a terminal, and only presses Enter when the
-  front window is running Claude.
+- **You keep your normal Claude Code TUI.** Bol pastes into the window you
+  are looking at: Terminal, iTerm2, Ghostty, Warp, Kitty, Alacritty, WezTerm,
+  the integrated terminals in VS Code, Cursor, Zed and JetBrains IDEs. Text
+  lands the moment you stop speaking. Dictation goes where your cursor is, in
+  any app, so the same voice works in Notes, Slack or a browser box; Bol
+  presses Enter by itself only when the front window is running Claude, and
+  whenever you say "send it".
 - **Completion detection is exact**, not screen scraping. Claude Code's own
   [hooks](https://code.claude.com/docs/en/hooks) post to Bol over loopback
   when a turn ends, with the final message and every tool call made.
@@ -115,7 +116,7 @@ never touch the terminal: only the final, full-accuracy decode is pasted. Voice 
 | "...fix the login bug" (3+ words) | pastes the prompt, and presses Enter if you tapped again or released |
 | "...fix the login bug **send it**" | same, in any mode and at any length |
 | "**type** hello world" | inserts text, no Enter |
-| "**send**" / "**go ahead**" | presses Enter (also answers permission prompts) |
+| "**send**" / "**go ahead**" | presses Enter wherever your cursor is (also answers permission prompts) |
 | "**close**" / "**scratch that**" | clears the input box |
 | "**interrupt**" / "**stop claude**" | Escape, stops the running turn |
 | "...**clean it up and send it**" | strips fillers and stutters, fixes "auth dot py" to `auth.py`, then submits |
@@ -146,7 +147,11 @@ hear every session.
 
 Bol listens from the moment it starts. Say **"type"** and talk; pause for
 three seconds and what you said is pasted where the cursor is. Say
-**"send it"** and it goes. Say **"hey Bol"** for the conversation flow above
+**"send it"** and it goes. That cursor does not have to be in a terminal:
+"type dinner with Sam at seven" fills a Notes window, and "type running ten
+minutes late send it" writes and sends a Slack message, because "send it"
+presses Enter wherever you are (a newline in Notes, a sent message in Slack,
+a submitted prompt in Claude). Say **"hey Bol"** for the conversation flow above
 (a recording with the usual auto-send rules), **"scratch that"** to wipe a
 paste, and **"stop listening"** to pause Bol until you press the key. For a
 minute after anything you say, the next sentence needs no trigger word at
@@ -257,8 +262,8 @@ In `api` mode your own model does the polish instead.
 |---|---|---|
 | Hotkey does nothing | Input Monitoring not granted | System Settings > Privacy & Security > Input Monitoring > enable your terminal, restart Bol |
 | "Lost the microphone" or silence | Mic permission or wrong input device | Grant Microphone to your terminal; set `[audio] input_device` |
-| Text appears but never sends | Front window is not running Claude | Focus the Claude Code tab; check `bol doctor` for the frontmost app |
-| "front app ... isn't a terminal" | Your terminal is not on the allowlist | `[bridge] allowed_apps = ["your.bundle.id"]`, `bol doctor` prints the id |
+| Text appears but never sends | Front window is not running Claude, so Bol will not press Enter on its own | Say "send it", which sends wherever you are; or focus the Claude Code tab |
+| "front app ... isn't a terminal" | `[bridge] anywhere = false` and your terminal is not on the allowlist | `[bridge] allowed_apps = ["your.bundle.id"]`, `bol doctor` prints the id |
 | Summaries sound robotic | Local model still downloading or failed | `bol setup` shows progress; `~/.config/bol/llm.log` has details |
 | Right Option types symbols | AltGr layout | `[hotkey] key = "cmd_r"` or `"f13"` |
 
@@ -272,8 +277,12 @@ In `api` mode your own model does the polish instead.
   never fails, so Claude Code never waits on Bol and stays quiet when Bol is
   not running. Setup shows you the entry first, writes atomically, and keeps
   a one-time backup next to it. `bol hook uninstall` removes them.
-- Injection only targets terminal apps, re-checks the front app right before
-  pasting, and restores your clipboard afterwards.
+- Dictation goes where your cursor is, in any app. Enter is the guarded half:
+  Bol presses it by itself only when the front window is running Claude, and
+  whenever you say "send it". Set `[bridge] anywhere = false` for the
+  terminal-only rule, where pastes and keystrokes alike are refused outside a
+  known terminal or IDE. Every paste re-checks the front app right before
+  Cmd+V and restores your clipboard afterwards.
 - In the default configuration nothing leaves your Mac. `provider = "api"`
   sends the summary prompt (tool log and Claude's last message) to the
   endpoint you configure, with your key.

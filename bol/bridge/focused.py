@@ -5,16 +5,26 @@ FluidVoice-style insertion with zero extra dependencies:
   restored. Enter/Escape/Ctrl-U go through System Events key codes.
 
 Needs the Automation/Accessibility permission macOS prompts for on first use
-(granted to the terminal running Bol). A frontmost-app allowlist keeps speech
-from landing in Slack: if the front app isn't a terminal or an editor, the
-injection is refused with a spoken warning instead.
+(granted to the terminal running Bol).
 
-Two guards sit on top of the allowlist:
-  - the frontmost app is re-read immediately before the Cmd+V keystroke, so a
-    Cmd-Tab mid-paste aborts instead of dictating into the new app;
-  - auto-Enter is withheld unless the front window is positively identified as
-    a Claude Code session (see _submit_allowed), because a stray Enter in a
-    plain shell executes the pasted speech.
+Text and Enter are guarded separately, because they are different mistakes.
+Pasting characters into the wrong window is a typo the user can see and undo;
+pressing Enter there runs a command, sends a message, or answers a prompt. So
+with [bridge] anywhere = true (the default) dictation lands wherever the
+cursor is, Notes and Slack included, while Enter still has to be earned:
+  - an explicit Enter is the user's own words ("send it", "go ahead") and goes
+    wherever they are looking;
+  - an automatic Enter is Bol's own guess that an utterance was a finished
+    instruction, and is withheld unless the front app is an allowlisted
+    terminal or IDE AND is positively identified as a Claude Code session
+    (see _submit_allowed) -- a stray Enter in a plain shell executes the
+    pasted speech.
+anywhere = false puts the allowlist back in front of everything, pastes and
+keys alike, which is what Bol did before.
+
+One guard sits under both: the frontmost app is re-read immediately before the
+Cmd+V keystroke, so a Cmd-Tab mid-paste aborts instead of dictating into the
+new app.
 """
 
 from __future__ import annotations
@@ -131,9 +141,21 @@ class SubmitBlocked(BridgeError):
 
 
 class FocusedBridge:
-    def __init__(self, allowed_apps: list[str] | None, enter_delay_s: float) -> None:
+    # This is the bridge with an app to be wrong about, so this is the one the
+    # daemon tells whether an Enter was asked for in words. The tmux bridge
+    # injects into a pinned Claude pane and takes no such flag; see
+    # bol/bridge/base.py explicit_kw.
+    explicit_aware = True
+
+    def __init__(
+        self,
+        allowed_apps: list[str] | None,
+        enter_delay_s: float,
+        anywhere: bool = True,
+    ) -> None:
         self._allowed = allowed_apps if allowed_apps else DEFAULT_ALLOWED_APPS
         self._enter_delay = enter_delay_s
+        self._anywhere = anywhere
 
     async def attach(self) -> str:
         # Nothing to pin; surface the permission need early with a probe.
@@ -156,9 +178,17 @@ class FocusedBridge:
         except ValueError:
             raise BridgeError(f"unreadable front app pid: {out[:40]!r}")
 
-    async def _guard(self) -> str:
-        """Check the front app is on the allowlist; returns its bundle id."""
+    async def _guard(self, anywhere_ok: bool) -> str:
+        """Check the front app may receive this at all; returns its bundle id.
+
+        anywhere_ok covers the things that are not Bol acting on its own: a
+        paste, which only ever puts characters in the field the user is
+        looking at, and a key the user asked for by name. Those go anywhere
+        under [bridge] anywhere = true. Everything else, and every call when
+        anywhere = false, still has to be a terminal or an IDE."""
         front = await self._frontmost()
+        if anywhere_ok and self._anywhere:
+            return front
         if front not in self._allowed:
             raise BridgeError(
                 f"front app {front or 'unknown'} isn't a terminal; "
@@ -237,6 +267,23 @@ class FocusedBridge:
             return False, f"the window titled {title!r} doesn't look like Claude"
         return True, ""
 
+    async def _enter_allowed(self, front: str, explicit: bool) -> tuple[bool, str]:
+        """Whether Enter may be pressed in the front app right now.
+
+        The split is intent. An explicit Enter came from the user's own words,
+        so it means what it does in the app they are looking at: a newline in
+        Notes, a sent message in Slack, a submitted prompt in Claude. Bol has
+        no business second-guessing that, so anywhere mode lets it through.
+        An automatic Enter is Bol's guess that an utterance was a finished
+        instruction, and a guess is only worth acting on where a wrong one is
+        cheap: the old gate, an allowlisted terminal or IDE with positive
+        evidence that Claude is running in it."""
+        if explicit and self._anywhere:
+            return True, ""
+        if front not in self._allowed:
+            return False, f"{front or 'that window'} isn't a terminal"
+        return await self._submit_allowed(front)
+
     async def _paste(self, text: str, front: str) -> None:
         """Put text on the pasteboard, press Cmd+V, restore the pasteboard.
 
@@ -280,10 +327,16 @@ class FocusedBridge:
             return None
         return previous
 
-    async def inject(self, text: str, submit: bool) -> None:
-        front = await self._guard()
+    async def inject(self, text: str, submit: bool, *, explicit: bool = False) -> None:
+        """Paste text, and optionally press Enter after it.
+
+        explicit says the Enter came from the user's words rather than from
+        Bol's auto-send rule. The paste is guarded as a paste either way, so a
+        withheld Enter still leaves the words in the box for a later
+        "send it" -- that is what SubmitBlocked means to the daemon."""
+        front = await self._guard(anywhere_ok=True)
         if submit:
-            allowed, reason = await self._submit_allowed(front)
+            allowed, reason = await self._enter_allowed(front, explicit)
             if not allowed:
                 if text:
                     await self._paste(text, front)
@@ -296,10 +349,10 @@ class FocusedBridge:
             await asyncio.sleep(self._enter_delay)
             await _osascript('tell application "System Events" to key code 36')
 
-    async def inject_keys(self, *keys: str) -> None:
-        front = await self._guard()
+    async def inject_keys(self, *keys: str, explicit: bool = False) -> None:
+        front = await self._guard(anywhere_ok=explicit)
         if "Enter" in keys:
-            allowed, reason = await self._submit_allowed(front)
+            allowed, reason = await self._enter_allowed(front, explicit)
             if not allowed:
                 raise SubmitBlocked(
                     f"{reason}, so press Enter yourself", reason
@@ -310,11 +363,33 @@ class FocusedBridge:
                     f'tell application "System Events" to key code {_KEYCODES[key]}'
                 )
             elif key == "C-u":
-                await _osascript(
-                    'tell application "System Events" to keystroke "u" using control down'
-                )
+                await self._discard_line(front)
             else:
                 raise BridgeError(f"unsupported key: {key}")
 
+    async def _discard_line(self, front: str) -> None:
+        """Take back what was just pasted, the way the front app understands.
+
+        Control-U kills the input line in a shell and in Claude Code's TUI. In
+        Notes or Slack it means nothing at all, so the paste would sit there
+        after the user said "scratch that". Everywhere else the paste is the
+        last edit, so one Cmd+Z takes exactly it back and leaves whatever was
+        in the field before it alone -- which Cmd+A then Delete would not.
+        An app that cannot even be named gets nothing: an undo sent into an
+        unknown window is a destructive edit on someone else's work."""
+        if not front:
+            log.info("front app unreadable, so nothing was discarded")
+            return
+        if front in TERMINAL_APPS or front in IDE_APPS:
+            await _osascript(
+                'tell application "System Events" to keystroke "u" using control down'
+            )
+            return
+        await _osascript(
+            'tell application "System Events" to keystroke "z" using command down'
+        )
+
     async def interrupt(self) -> None:
-        await self.inject_keys("Escape")
+        # Escape is only ever said out loud ("interrupt", "stop claude"), so
+        # it goes where the user is looking, like the other spoken keys.
+        await self.inject_keys("Escape", explicit=True)

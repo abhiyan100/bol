@@ -31,6 +31,17 @@ class Bridge(Protocol):
     async def interrupt(self) -> None: ...
 
 
+def explicit_kw(bridge: object, explicit: bool) -> dict:
+    """The explicit= keyword, for bridges that can be pointed at the wrong app.
+
+    Only the focused bridge has an app guard, so only it needs to know whether
+    an Enter came from the user's words or from Bol's auto-send rule. The tmux
+    bridge injects into a pinned Claude pane -- there is nothing to be wrong
+    about, and it was deliberately left as it was, so handing it the keyword
+    would be a TypeError. One place says which is which."""
+    return {"explicit": explicit} if getattr(bridge, "explicit_aware", False) else {}
+
+
 def build_bridge(cfg) -> "Bridge":
     from .focused import FocusedBridge
     from .tmux import TmuxBridge
@@ -39,7 +50,9 @@ def build_bridge(cfg) -> "Bridge":
     if mode == "tmux":
         return TmuxBridge(cfg.bridge.pane, cfg.bridge.enter_delay_s)
     if mode == "focused":
-        return FocusedBridge(cfg.bridge.allowed_apps, cfg.bridge.enter_delay_s)
+        return FocusedBridge(
+            cfg.bridge.allowed_apps, cfg.bridge.enter_delay_s, cfg.bridge.anywhere
+        )
     return AutoBridge(cfg)
 
 
@@ -62,7 +75,9 @@ class AutoBridge:
             return desc
         except TmuxError:
             focused = FocusedBridge(
-                self._cfg.bridge.allowed_apps, self._cfg.bridge.enter_delay_s
+                self._cfg.bridge.allowed_apps,
+                self._cfg.bridge.enter_delay_s,
+                self._cfg.bridge.anywhere,
             )
             desc = await focused.attach()
             self._inner = focused
@@ -74,11 +89,17 @@ class AutoBridge:
             raise BridgeError("bridge not attached")
         return self._inner
 
-    async def inject(self, text: str, submit: bool) -> None:
-        await self.inner.inject(text, submit)
+    # Which bridge is inside is decided at attach time, so whether explicit=
+    # is understood is too. Asking each call keeps the daemon from having to.
+    explicit_aware = True
 
-    async def inject_keys(self, *keys: str) -> None:
-        await self.inner.inject_keys(*keys)
+    async def inject(self, text: str, submit: bool, *, explicit: bool = False) -> None:
+        inner = self.inner
+        await inner.inject(text, submit, **explicit_kw(inner, explicit))
+
+    async def inject_keys(self, *keys: str, explicit: bool = False) -> None:
+        inner = self.inner
+        await inner.inject_keys(*keys, **explicit_kw(inner, explicit))
 
     async def interrupt(self) -> None:
         await self.inner.interrupt()

@@ -85,18 +85,35 @@ instead. Both are deadline-bounded with a size-sanity check and the
 deterministic text as the unconditional fallback. Cleanup runs AFTER command
 parsing, so "send it" can never be cleaned away.
 
-**Focused-mode submit is gated twice.** The app allowlist (bundle ids of
-known terminals and IDEs) proves the front app can host a shell, not that
-Claude is in the active tab; pasting speech plus Enter into a plain shell
-would execute it. So auto-Enter also requires evidence that Claude is
-running there. For terminals: the window title contains the whole word
-"claude" and is not a `claude-<slug>` project name. For IDEs, whose titles
-name the file, not the terminal: a `claude` process must exist in the
-frontmost app's process tree. Unreadable title or process list fails closed.
-When the gate blocks, Bol still types the text, withholds Enter, and says
-why (`SubmitBlocked.reason`). Paste itself re-checks the front app right
+**Focused-mode text goes anywhere; Enter is gated by who asked for it.**
+Pasting characters into the wrong window is a visible typo; pressing Enter
+there runs a command or sends a message. So the two are guarded separately.
+Under `[bridge] anywhere = true` (default) a paste lands wherever the cursor
+is, Notes and Slack included, and every Enter is labelled at the one place
+that knows: an explicit Enter came from the user's own words ("send it", the
+send trigger word, "go ahead" on a permission prompt) and is honoured
+wherever they are looking, because saying it *is* the intent; an automatic
+Enter is Bol's auto-send rule guessing that an utterance was a finished
+instruction, and a guess only gets to act where a wrong one is cheap. So
+automatic Enter keeps the old double gate: the app allowlist (bundle ids of
+known terminals and IDEs), which proves the front app can host a shell, AND
+evidence that Claude is in the active tab, because pasting speech plus Enter
+into a plain shell would execute it. For terminals: the window title contains
+the whole word "claude" and is not a `claude-<slug>` project name. For IDEs,
+whose titles name the file, not the terminal: a `claude` process must exist
+in the frontmost app's process tree. Unreadable title or process list fails
+closed. When the gate blocks, Bol still types the text, withholds Enter, and
+says why (`SubmitBlocked.reason`), which leaves exactly a pending paste for a
+later "send it". `anywhere = false` puts the allowlist back in front of every
+paste and keystroke, which is what Bol did before. Spoken discard follows the
+same explicit rule but not the same keystroke: Control-U kills the input line
+in a shell and means nothing in Notes, so outside a terminal or IDE it
+becomes one Cmd+Z, which undoes the paste and nothing else; an unreadable
+front app gets nothing at all. Paste itself re-checks the front app right
 before Cmd+V and restores the clipboard in a `finally`, skipping the restore
-when the clipboard held non-text content.
+when the clipboard held non-text content. The tmux bridge is untouched by all
+of this: it injects into a pinned Claude pane, so there is no app to be wrong
+about and it takes no such flag (`explicit_kw` in `bol/bridge/base.py`).
 
 **One narrated session at a time.** Hook payloads carry `session_id` and
 `cwd`, so the daemon binds to the first session it hears from and ignores

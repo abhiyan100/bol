@@ -76,6 +76,17 @@ END_REASONS = ("release", "tap", "silence", "window", "max", "cancelled", "stop"
 # dropped rather than transcribed: the user is looking at something else.
 CANCELLED = "cancelled"
 
+# The pill's level meter, in dBFS. RMS is a linear measure of a logarithmic
+# sense: a voice at arm's length sits near the bottom of a linear scale and
+# barely moves a meter, so the reading is mapped in decibels instead. -60 dB
+# is a quiet room and -12 dB is somebody speaking up.
+LEVEL_FLOOR_DB = -60.0
+LEVEL_CEILING_DB = -12.0
+# Smoothing per 32 ms block: rise on the syllable, fall over about 120 ms.
+# A meter that tracked every block would strobe at the block rate.
+LEVEL_ATTACK = 0.6
+LEVEL_RELEASE = 0.2
+
 
 def _resolve_input_device(spec: str) -> int | None:
     """Map [audio] input_device to a sounddevice id. Accepts an index or a
@@ -116,6 +127,25 @@ def _feed_tap(tap, block: np.ndarray) -> None:
             tap(block)
     except Exception:  # noqa: BLE001 - see the docstring
         pass
+
+
+def block_level(block, previous: float = 0.0) -> float:
+    """One block of audio as a 0..1 meter reading, smoothed against the last.
+
+    Pure and cheap, because it runs on PortAudio's thread between two
+    deadlines: a square, a mean, and one logarithm over 512 samples.
+    """
+    samples = np.asarray(block, dtype=np.float64).reshape(-1)
+    rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
+    if not np.isfinite(rms) or rms <= 0.0:
+        target = 0.0
+    else:
+        decibels = 20.0 * float(np.log10(rms))
+        span = LEVEL_CEILING_DB - LEVEL_FLOOR_DB
+        target = min(1.0, max(0.0, (decibels - LEVEL_FLOOR_DB) / span))
+    previous = previous if np.isfinite(previous) else 0.0
+    rate = LEVEL_ATTACK if target > previous else LEVEL_RELEASE
+    return previous + (target - previous) * rate
 
 
 class RecordingSession:
@@ -194,6 +224,11 @@ class Recorder:
         # it sees every block for as long as the stream runs.
         self._monitor = None
         self._hold_open = False
+        # Set by the daemon to a callable taking one 0..1 float: how loud the
+        # room is right now, for the pill's meter. Called on the event loop,
+        # once per block, and only while a recording is live.
+        self.on_level = None
+        self._level = 0.0
         self._ring: deque[np.ndarray] = deque(maxlen=max(1, _RING_MS // BLOCK_MS))
         self._warm_task: asyncio.Task | None = None
         self._logged_latency = False
@@ -257,6 +292,13 @@ class Recorder:
         sink, loop = self._sink, self._loop
         if sink is not None and loop is not None:
             loop.call_soon_threadsafe(sink.put_nowait, block)
+            # The pill's level meter. Measured here because this is the only
+            # place the audio exists in real time, and handed over on the
+            # event loop because the pill's client is not thread-safe.
+            hook = self.on_level
+            if hook is not None:
+                self._level = block_level(block, self._level)
+                loop.call_soon_threadsafe(hook, self._level)
         # Fed straight from this thread: the tap is a thread-safe queue on
         # purpose, so the words on screen don't wait for the event loop.
         tap = self._tap
@@ -429,6 +471,7 @@ class Recorder:
                     _feed_tap(tap, block)
             self._sink = queue
             self._tap = tap
+            self._level = 0.0  # every recording's meter starts from silence
             if not was_running:
                 self._start_stream()
         except Exception:

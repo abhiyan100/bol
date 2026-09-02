@@ -640,10 +640,17 @@ def probe_frontmost(cfg) -> tuple[str, str, str]:
     allowed = set(cfg.bridge.allowed_apps) or set(DEFAULT_ALLOWED_APPS)
     if bundle in allowed:
         return (OK, f"frontmost app: {bundle} (allowed to receive dictation)", "")
+    if cfg.bridge.anywhere:
+        return (
+            OK,
+            f"frontmost app: {bundle} (dictation lands here; Bol presses Enter "
+            'by itself only in a Claude window, and wherever you say "send it")',
+            "",
+        )
     return (
         INFO,
         f"frontmost app: {bundle} is not allowed; add it with "
-        f'[bridge] allowed_apps = ["{bundle}"]',
+        f'[bridge] allowed_apps = ["{bundle}"] or set [bridge] anywhere = true',
         "",
     )
 

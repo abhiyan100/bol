@@ -41,7 +41,7 @@ from pathlib import Path
 
 from .audio import Recorder
 from .audio.capture import CANCELLED
-from .bridge import BridgeError, build_bridge, frontmost_bundle_id
+from .bridge import BridgeError, build_bridge, explicit_kw, frontmost_bundle_id
 from .bridge.focused import SubmitBlocked
 from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
 from .config import Config, hook_token, validate_config
@@ -231,7 +231,9 @@ class Daemon:
         self._pending_paste = False
         # The on-screen pill. Inert until start(), and every call on it is a
         # no-op when the child is missing.
-        self.hud = Hud(enabled=cfg.ui.pill, position=cfg.ui.position)
+        self.hud = Hud(
+            enabled=cfg.ui.pill, position=cfg.ui.position, text=cfg.ui.text
+        )
 
         self._listen_lock = asyncio.Lock()
         # Hook handlers run as independent tasks; without this a Stop and a
@@ -289,6 +291,10 @@ class Daemon:
             await self._text_console()
             return
 
+        # The pill's level meter, straight off the recorder's own callback.
+        # Hud.level throttles it and drops anything measured while the pill
+        # is showing something other than listening.
+        self.recorder.on_level = self.hud.level
         await self._open_microphone()
         await self._start_wake()
 
@@ -483,13 +489,15 @@ class Daemon:
         try:
             if kind == SEND:
                 self._permission_session = None
-                await self.bridge.inject_keys("Enter")
+                # A trigger word is the user saying it, so this Enter goes
+                # wherever they are looking, Notes and Slack included.
+                await self._keys("Enter", explicit=True)
                 self._pending_paste = False
                 self.hud.set("sending", "Sent")
                 self._cue("done")
                 print("bol: sent. Claude's turn.")
             else:
-                await self.bridge.inject_keys("C-u")
+                await self._keys("C-u", explicit=True)
                 self._pending_paste = False
                 self._idle_pill()
                 self._cue("discard")
@@ -901,6 +909,19 @@ class Daemon:
     _YES = {"yes", "yeah", "yep", "approve", "go ahead", "do it"}
     _NO = {"no", "nope", "deny", "don't", "dont"}
 
+    # Every keystroke Bol sends is either the user's words or Bol's own guess,
+    # and the focused bridge treats the two differently: an explicit Enter goes
+    # wherever the cursor is, an automatic one only into a Claude window. These
+    # two wrappers are where the daemon says which, and they keep the tmux
+    # bridge, which takes no such flag, out of it.
+    async def _inject(
+        self, text: str, submit: bool = False, explicit: bool = False
+    ) -> None:
+        await self.bridge.inject(text, submit, **explicit_kw(self.bridge, explicit))
+
+    async def _keys(self, *keys: str, explicit: bool = False) -> None:
+        await self.bridge.inject_keys(*keys, **explicit_kw(self.bridge, explicit))
+
     async def _handle_utterance(
         self, text: str, end_reason: str = "", typing: bool = False
     ) -> bool:
@@ -952,12 +973,14 @@ class Daemon:
             )
             return True
         if approve:
-            await self.bridge.inject_keys("Enter")
+            # "Go ahead" is the user answering a question they were just read,
+            # which is as explicit as an Enter gets.
+            await self._keys("Enter", explicit=True)
             self._pending_paste = False
             self.hud.set("sending", "Approved")
             print("bol: approved.")
             return False
-        await self.bridge.inject_keys("Escape")
+        await self._keys("Escape", explicit=True)
         self._pending_paste = False
         self.hud.set("sending", "Denied")
         print("bol: denied.")
@@ -975,6 +998,10 @@ class Daemon:
         were still thinking. submit = "always" keeps the old, timing-blind
         rule. Anything ending in "send it" never reaches here, it is already
         Action.SEND.
+
+        True here also marks the Enter automatic for the bridge, which is what
+        keeps a guessed send inside a Claude window while a spoken one goes
+        wherever the cursor is.
         """
         submit = self.cfg.hotkey.submit
         if submit not in ("auto", "always") or not text:
@@ -1013,7 +1040,15 @@ class Daemon:
                 print(f"bol: cleaned -> {cleaned}")
                 text = cleaned
         held_back = action is Action.DICTATE and self._pasted_on_silence(text, end_reason)
-        if action is Action.DICTATE and not typing and self._auto_sends(text, end_reason):
+        # Whether the Enter below is the user's words or Bol's own rule. The
+        # bridge decides where each one may land, so it has to be told which
+        # this is, and this is the only place that knows.
+        automatic = (
+            action is Action.DICTATE
+            and not typing
+            and self._auto_sends(text, end_reason)
+        )
+        if automatic:
             # Plain speech is a whole instruction the user finished on
             # purpose, so send it. A "type ..." prefix (Action.TYPE) still
             # pastes without Enter, and a trailing "send it" is still stripped
@@ -1031,7 +1066,7 @@ class Daemon:
             # a lone space would litter Claude's input box.
             if not text:
                 return True
-            await self.bridge.inject(
+            await self._inject(
                 text + " " if action is Action.DICTATE else text, submit=False
             )
             # Bol put text in the box and did not submit it, which is the
@@ -1054,15 +1089,20 @@ class Daemon:
             return True
         if action is Action.SEND:
             self._permission_session = None
-            await self.bridge.inject(text, submit=True)
+            # A SEND the grammar parsed is "send it" and goes wherever the
+            # user is looking; a SEND promoted from dictation two blocks up is
+            # Bol's guess, and stays gated on a Claude window.
+            await self._inject(text, submit=True, explicit=not automatic)
             self._pending_paste = False
             self.hud.set("sending", "Sent")
             self._cue("done")
             print("bol: sent. Claude's turn.")
             return False
         if action is Action.DISCARD:
-            # C-u wipes Claude Code's input line.
-            await self.bridge.inject_keys("C-u")
+            # C-u wipes Claude Code's input line. The user said so, so it is
+            # allowed outside a terminal too, where the bridge turns it into
+            # the one Cmd+Z that undoes the paste.
+            await self._keys("C-u", explicit=True)
             self._pending_paste = False
             self._idle_pill()
             self._cue("discard")

@@ -280,3 +280,43 @@ def test_superseded_defaults_flags_the_old_hotkey_mode():
     (hint,) = superseded_defaults(cfg)
     assert 'mode = "auto"' in hint
     assert "push_to_talk" in hint
+
+
+# ------------------------------------------------------- where Bol may paste
+
+
+def test_dictation_goes_anywhere_by_default():
+    cfg = Config()
+    assert cfg.bridge.anywhere is True
+
+
+def test_anywhere_is_in_the_default_file_and_agrees_with_the_dataclass():
+    data = tomllib.loads(DEFAULT_CONFIG_TOML)
+    cfg = Config()
+    for key, value in data["bridge"].items():
+        assert getattr(cfg.bridge, key) == value, key
+    assert data["bridge"]["anywhere"] is True
+
+
+def test_terminal_only_is_one_line(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[bridge]\nanywhere = false\n")
+
+    cfg = load_config(path)
+
+    assert cfg.bridge.anywhere is False
+    validate_config(cfg)
+
+
+def test_validate_rejects_a_quoted_anywhere():
+    # A non-empty string is truthy, so "false" would mean the opposite of
+    # what it says, and it would mean it about where Enter may land.
+    cfg = Config()
+    cfg.bridge.anywhere = "false"
+
+    with pytest.raises(ValueError) as err:
+        validate_config(cfg)
+
+    message = str(err.value)
+    assert "[bridge] anywhere" in message
+    assert "true or false" in message

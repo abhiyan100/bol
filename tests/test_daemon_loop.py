@@ -11,8 +11,10 @@ import pytest
 
 from bol.audio.capture import RecordingSession
 from bol import daemon as daemon_mod
+from bol.bridge.focused import SubmitBlocked
 from bol.config import Config
 from bol.daemon import Daemon
+from bol.wake import CANCEL, SEND
 
 
 class FakeRecorder:
@@ -62,6 +64,34 @@ class FakeBridge:
 
     async def interrupt(self):
         self.keys.append(("Escape",))
+
+
+class ExplicitBridge(FakeBridge):
+    """A focused-style bridge: one with an app to be wrong about.
+
+    FakeBridge above stands in for tmux, which injects into a pinned Claude
+    pane and takes no explicit flag, so the daemon must never hand it one --
+    every test using it would raise TypeError if that changed. This one
+    advertises the flag and records what it was told, in call order.
+    """
+
+    explicit_aware = True
+
+    def __init__(self):
+        super().__init__()
+        self.explicit = []
+
+    async def inject(self, text, submit, explicit=False):
+        self.explicit.append(explicit)
+        await super().inject(text, submit)
+
+    async def inject_keys(self, *keys, explicit=False):
+        self.explicit.append(explicit)
+        await super().inject_keys(*keys)
+
+    async def interrupt(self):
+        self.explicit.append(True)
+        await super().interrupt()
 
 
 class FakeSpeaker:
@@ -1241,3 +1271,141 @@ async def test_a_typed_line_still_submits_itself():
 
     assert d.bridge.injected == [("add a login test", True)]
     assert reopen is False
+
+
+# ------------------------------------------- the user's words vs Bol's guess
+
+# Enter goes wherever the cursor is when the user asked for it out loud, and
+# only into a Claude window when Bol decided by itself. The daemon is the one
+# place that knows which of the two an Enter is, so this is where it is tested;
+# what each kind is then allowed to do lives in tests/test_bridge.py.
+
+
+def _explicit_daemon(utterances, texts, submit="voice"):
+    d = _daemon(utterances, texts, submit=submit)
+    d.bridge = ExplicitBridge()
+    return d
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_send_it_is_an_explicit_enter():
+    d = _explicit_daemon(1, ["add a login test send it"])
+
+    await d._handle_utterance("add a login test send it", "silence")
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert d.bridge.explicit == [True]
+
+
+@pytest.mark.asyncio
+async def test_the_send_trigger_word_is_an_explicit_enter():
+    d = _explicit_daemon(0, [])
+    d._pending_paste = True
+
+    await d._run_wake_command(SEND)
+
+    assert d.bridge.keys == [("Enter",)]
+    assert d.bridge.explicit == [True]
+    assert d._pending_paste is False
+
+
+@pytest.mark.asyncio
+async def test_an_auto_send_enter_is_automatic():
+    # Nobody said "send it"; the rule decided the utterance was finished.
+    d = _explicit_daemon(1, ["add a login test"], submit="auto")
+
+    await d._handle_utterance("add a login test", "tap")
+
+    assert d.bridge.injected == [("add a login test", True)]
+    assert d.bridge.explicit == [False]
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_auto_send_leaves_a_pending_paste():
+    """The words were typed into the wrong window; the Enter was not."""
+
+    class BlockedBridge(ExplicitBridge):
+        async def inject(self, text, submit, explicit=False):
+            self.explicit.append(explicit)
+            if submit:
+                raise SubmitBlocked("Notes isn't Claude", "Notes isn't Claude")
+            await FakeBridge.inject(self, text, submit)
+
+    d = _explicit_daemon(1, ["add a login test"], submit="auto")
+    d.bridge = BlockedBridge()
+
+    reopen = await d._handle_utterance("add a login test", "tap")
+
+    assert d.bridge.explicit == [False]        # it was Bol's guess that was refused
+    assert d._pending_paste is True            # so "send it" can still finish it
+    assert "didn't press Enter" in d.speaker.spoken[-1]
+    assert reopen is True
+
+
+@pytest.mark.asyncio
+async def test_a_permission_answer_is_an_explicit_enter():
+    d = _explicit_daemon(1, ["yes"])
+    d._permission_session = "s1"
+
+    await d._handle_utterance("yes")
+
+    assert d.bridge.keys == [("Enter",)]
+    assert d.bridge.explicit == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_denied_permission_is_an_explicit_escape():
+    d = _explicit_daemon(1, ["no"])
+    d._permission_session = "s1"
+
+    await d._handle_utterance("no")
+
+    assert d.bridge.keys == [("Escape",)]
+    assert d.bridge.explicit == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_discard_is_explicit_so_it_works_outside_a_terminal():
+    # C-u only clears a line in a terminal; the flag is what lets the bridge
+    # turn it into the one Cmd+Z that undoes the paste in Notes or Slack.
+    d = _explicit_daemon(1, ["scratch that"])
+
+    await d._handle_utterance("scratch that")
+
+    assert d.bridge.keys == [("C-u",)]
+    assert d.bridge.explicit == [True]
+
+
+@pytest.mark.asyncio
+async def test_the_cancel_trigger_word_is_explicit_too():
+    d = _explicit_daemon(0, [])
+    d._pending_paste = True
+
+    await d._run_wake_command(CANCEL)
+
+    assert d.bridge.keys == [("C-u",)]
+    assert d.bridge.explicit == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_paste_claims_no_intent():
+    # A paste presses nothing, so it needs no permission to speak of: it is
+    # allowed wherever the cursor is on its own terms.
+    d = _explicit_daemon(1, ["add a login test"])
+
+    await d._handle_utterance("add a login test", "silence")
+
+    assert d.bridge.injected == [("add a login test ", False)]
+    assert d.bridge.explicit == [False]
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_without_the_flag_is_never_handed_one():
+    # FakeBridge's inject_keys takes no explicit keyword, exactly like the
+    # tmux bridge this change left alone, so a TypeError here would be the
+    # daemon breaking tmux mode.
+    d = _daemon(1, ["scratch that"])
+
+    await d._handle_utterance("scratch that")
+
+    assert d.bridge.keys == [("C-u",)]

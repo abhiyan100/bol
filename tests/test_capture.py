@@ -837,3 +837,84 @@ async def test_every_reason_is_documented():
         "release", "tap", "silence", "window", "max", "cancelled", "stop",
     }
     assert capture.CANCELLED in capture.END_REASONS
+
+
+# ------------------------------------------------------------- level meter
+
+# The pill's meter reads the microphone from the audio callback, because that
+# is the only place the audio exists in real time. Two things have to hold:
+# the numbers are a usable 0..1 for a voice, and nothing is measured when
+# nobody is recording.
+
+
+def test_silence_and_a_voice_land_at_opposite_ends():
+    quiet = capture.block_level(_silence(1)[0])
+    loud = capture.block_level(_speech(1)[0])
+    assert 0.0 <= quiet < 0.15
+    assert loud > quiet
+    assert 0.0 <= loud <= 1.0
+
+
+def test_an_empty_or_broken_block_reads_as_silence():
+    assert capture.block_level(np.zeros(BLOCK, dtype=np.float32)) == 0.0
+    assert capture.block_level(np.zeros(0, dtype=np.float32)) == 0.0
+    assert 0.0 <= capture.block_level(np.full(BLOCK, np.nan, dtype=np.float32)) <= 1.0
+
+
+def test_the_meter_rises_faster_than_it_falls():
+    # A meter that tracked every block would strobe at the block rate; one
+    # that lagged the attack would miss the syllable it exists to show.
+    speech = _speech(1)[0]
+    rise = capture.block_level(speech, 0.0)
+    settled = capture.block_level(speech, rise)
+    assert 0.0 < rise < settled  # still climbing towards the same block
+    fall = capture.block_level(np.zeros(BLOCK, dtype=np.float32), settled)
+    assert 0.0 < fall < settled
+    # 120 ms of silence is about four blocks: most of the way down, not all.
+    assert fall > settled * 0.5
+
+
+async def test_a_recording_feeds_the_level_hook(monkeypatch):
+    levels = []
+    recorder = Recorder(_cfg())
+    recorder.on_level = levels.append
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(10), on_exhausted=session.request_stop)
+
+    await _record(recorder, session, until_silence=False)
+
+    assert len(levels) >= 5
+    assert all(0.0 <= level <= 1.0 for level in levels)
+    assert max(levels) > 0.1  # a voice moved it
+
+
+async def test_nothing_is_measured_between_recordings(monkeypatch):
+    # The stream stays warm after a recording. The meter must not keep
+    # reporting into a pill that has moved on to thinking.
+    levels = []
+    recorder = Recorder(_cfg())
+    recorder.on_level = levels.append
+    session = recorder.begin()
+    stream = _fake_sd(monkeypatch, _speech(6), on_exhausted=session.request_stop)
+
+    await _record(recorder, session, until_silence=False, close=False)
+    during = len(levels)
+    stream[0].feed(_speech(10))
+    await asyncio.sleep(0.05)  # the warm stream keeps calling the callback
+    await recorder.close()
+
+    assert during >= 3
+    assert len(levels) == during
+
+
+async def test_the_meter_costs_nothing_when_nobody_asked(monkeypatch):
+    # on_level unset is the ordinary case (the pill is off, or too old a
+    # daemon): the callback must not measure anything at all.
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _speech(6), on_exhausted=session.request_stop)
+
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    assert recorder.on_level is None

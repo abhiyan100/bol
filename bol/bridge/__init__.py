@@ -1,4 +1,4 @@
-from .base import AutoBridge, Bridge, BridgeError, build_bridge
+from .base import AutoBridge, Bridge, BridgeError, build_bridge, explicit_kw
 from .focused import (
     DEFAULT_ALLOWED_APPS,
     IDE_APPS,
@@ -14,6 +14,7 @@ __all__ = [
     "Bridge",
     "BridgeError",
     "build_bridge",
+    "explicit_kw",
     "FocusedBridge",
     "SubmitBlocked",
     "frontmost_bundle_id",

@@ -1,8 +1,10 @@
-"""The pill: what it says (render) and how the daemon talks to it (Hud).
+"""The pill: what it shows (render) and how the daemon talks to it (Hud).
 
-Nothing here opens a window. The AppKit half is one thin file whose only job
-is to draw what these functions decide, and the client half is tested against
-a fake process because the failure that matters is a child that died.
+Nothing here opens a window. The AppKit half is one file whose only job is to
+draw what these functions decide, so the state table, the five dot patterns
+and the level meter are all checked here, on any machine, with no window
+server. The client half is tested against a fake process because the failure
+that matters is a child that died.
 """
 
 import asyncio
@@ -12,48 +14,226 @@ import pytest
 
 from bol.hud import Hud
 from bol.hud.render import (
-    COLORS,
+    BREATHE_LOW,
+    DIM_ALPHA,
+    DOT_COUNT,
+    DOTS,
+    LIT_ALPHA,
     MAX_CHARS,
+    MOTIONS,
+    PASTED,
     STATES,
     Update,
-    color_for,
+    animated,
+    clamp_level,
+    dot_alphas,
+    dots_for,
     draft_span,
     hold_for,
     label_for,
+    listening_dots,
     parse_line,
+    phase,
     render,
     tool_line,
     truncate_middle,
 )
 
+# ---------------------------------------------------------------- state table
+
+
+def test_every_state_has_a_dot_pattern():
+    assert set(DOTS) == set(STATES)
+    for state, dots in DOTS.items():
+        assert dots.motion in MOTIONS, state
+        assert 0.0 <= dots.alpha <= 1.0, state
+        assert 0.0 <= dots.icon <= 1.0, state
+
+
+def test_idle_is_the_pill_being_gone():
+    assert dots_for("idle").motion == "hidden"
+    assert label_for("idle") == ""
+
+
+def test_an_unknown_state_shows_nothing():
+    assert dots_for("dancing").motion == "hidden"
+    assert label_for("dancing") == ""
+
+
+def test_the_documented_motion_for_each_state():
+    assert dots_for("listening").motion == "level"
+    assert dots_for("finalizing").motion == "sweep"
+    assert dots_for("thinking").motion == "bounce"
+    assert dots_for("speaking").motion == "breathe"
+    assert dots_for("sending").motion == "all"
+    assert dots_for("permission").motion == "blink"
+    assert dots_for("error").motion == "steady"
+    assert dots_for("awake").motion == "dim"
+
+
+def test_colour_is_spent_only_where_the_user_has_to_do_something():
+    # White for everything Bol is doing under its own steam.
+    for state in ("listening", "finalizing", "thinking", "speaking", "sending"):
+        assert dots_for(state).color == "", state
+    assert dots_for("permission").color == "amber"
+    assert dots_for("error").color == "red"
+
+
+def test_the_awake_window_dims_the_mark_rather_than_lighting_a_dot():
+    awake = dots_for("awake")
+    assert awake.icon < 1.0
+    assert dot_alphas(awake) == (DIM_ALPHA,) * DOT_COUNT
+
+
+def test_a_paste_hint_is_a_sending_that_carries_its_own_hold():
+    # The one line on the pill the user is meant to answer, so it gets its
+    # own colour. Same wire protocol as it always had: state plus a hold.
+    assert dots_for("sending", 2.5) == PASTED
+    assert PASTED.color == "blue"
+    assert PASTED.alpha < LIT_ALPHA
+    # An ordinary "Sent" is unchanged.
+    assert dots_for("sending").color == ""
+    assert dots_for("sending", 0.0).color == ""
+
+
+def test_only_the_moving_patterns_ask_for_a_clock():
+    for state in ("finalizing", "thinking", "speaking", "permission"):
+        assert animated(dots_for(state)) is True, state
+    # A meter the daemon drives, an error, a paste hint and an idle pill all
+    # sit still: none of them should wake the CPU thirty times a second.
+    for state in ("idle", "awake", "listening", "sending", "error"):
+        assert animated(dots_for(state)) is False, state
+    assert animated(PASTED) is False
+
+
+# ------------------------------------------------------------------ the dots
+
+
+def test_the_level_meter_lights_dots_from_the_left():
+    assert listening_dots(0.0) == 1
+    assert listening_dots(0.3) == 2
+    assert listening_dots(0.5) == 3
+    assert listening_dots(0.7) == 4
+    assert listening_dots(1.0) == DOT_COUNT
+
+
+def test_a_listening_pill_never_goes_completely_dark():
+    # Every dot dark reads as a pill that has stopped listening, which is the
+    # one thing it must not say while the microphone is open.
+    assert listening_dots(0.0) == 1
+    assert listening_dots(-5.0) == 1
+    assert listening_dots(float("nan")) == 1
+    assert listening_dots("loud") == 1
+    assert listening_dots(9.0) == DOT_COUNT
+
+
+def test_the_level_pattern_is_lit_then_dim():
+    alphas = dot_alphas(dots_for("listening"), level=0.5)
+    assert alphas == (LIT_ALPHA, LIT_ALPHA, LIT_ALPHA, DIM_ALPHA, DIM_ALPHA)
+    assert dot_alphas(dots_for("listening"), level=1.0) == (LIT_ALPHA,) * DOT_COUNT
+
+
+def test_every_pattern_answers_for_all_five_dots():
+    for state in STATES:
+        for elapsed in (0.0, 0.13, 0.7, 3.4):
+            alphas = dot_alphas(dots_for(state), elapsed, 0.4)
+            assert len(alphas) == DOT_COUNT, state
+            assert all(0.0 <= a <= 1.0 for a in alphas), (state, alphas)
+
+
+def test_the_sweep_runs_left_to_right():
+    dots = dots_for("finalizing")  # 400 ms, five dots, 80 ms each
+    heads = [dot_alphas(dots, e).index(LIT_ALPHA) for e in (0.0, 0.1, 0.18, 0.26, 0.39)]
+    assert heads == [0, 1, 2, 3, 4]
+    # And starts over rather than stopping on the last dot: finalizing lasts
+    # as long as the decoder does.
+    assert dot_alphas(dots, 0.41).index(LIT_ALPHA) == 0
+
+
+def test_the_bounce_goes_out_and_comes_back():
+    dots = dots_for("thinking")  # 900 ms there and back
+    assert dot_alphas(dots, 0.0)[0] == LIT_ALPHA
+    assert dot_alphas(dots, 0.45)[DOT_COUNT - 1] == LIT_ALPHA
+    assert dot_alphas(dots, 0.9)[0] == LIT_ALPHA
+
+
+def test_a_travelling_head_is_always_one_whole_dot():
+    # An interpolated head that fell between two dots washed the whole row
+    # out to one grey, and a row of identical dots reads as no motion.
+    for state in ("thinking", "finalizing"):
+        dots = dots_for(state)
+        for step in range(24):
+            alphas = dot_alphas(dots, step * dots.period / 24.0)
+            assert alphas.count(LIT_ALPHA) == 1, (state, alphas)
+
+
+def test_the_breath_swells_together():
+    dots = dots_for("speaking")  # 1.2 s, 40 to 95 percent
+    low = dot_alphas(dots, 0.0)
+    high = dot_alphas(dots, 0.6)
+    assert low == (BREATHE_LOW,) * DOT_COUNT
+    assert high == (LIT_ALPHA,) * DOT_COUNT
+    # All five move as one: a breath, not a meter.
+    assert len(set(dot_alphas(dots, 0.3))) == 1
+
+
+def test_the_permission_blink_is_on_and_off():
+    dots = dots_for("permission")
+    assert dot_alphas(dots, 0.0) == (LIT_ALPHA,) * DOT_COUNT
+    assert dot_alphas(dots, 1.0) == (DIM_ALPHA,) * DOT_COUNT
+
+
+def test_a_phase_is_where_in_the_cycle_we_are():
+    assert phase(0.0, 0.4) == 0.0
+    assert phase(0.2, 0.4) == 0.5
+    assert phase(0.6, 0.4) == pytest.approx(0.5)
+    # A still pattern has no cycle to be part of, and nonsense costs nothing.
+    assert phase(1.0, 0.0) == 0.0
+    assert phase(float("inf"), 0.4) == 0.0
+    assert phase("soon", 0.4) == 0.0
+
+
+# ---------------------------------------------------------------- the level
+
+
+def test_a_level_is_clamped_to_the_meter():
+    assert clamp_level(0.4) == 0.4
+    assert clamp_level(3.0) == 1.0
+    assert clamp_level(-1.0) == 0.0
+
+
+@pytest.mark.parametrize("value", [None, "loud", float("nan"), float("inf"), [0.5]])
+def test_an_unusable_level_is_silence_rather_than_a_dropped_line(value):
+    assert clamp_level(value) == 0.0
+
+
+def test_a_level_survives_the_pipe():
+    update = parse_line(json.dumps({"state": "listening", "level": 0.72}))
+    assert update == Update("listening", "", "", 0.0, 0.72)
+    assert listening_dots(update.level) == 4
+
+
+def test_a_line_with_no_level_is_the_ordinary_case():
+    # Every state but listening leaves it out, and so does any daemon that
+    # predates the meter.
+    assert parse_line('{"state": "thinking"}').level == 0.0
+
+
+def test_a_key_the_child_does_not_know_is_ignored_not_refused():
+    line = json.dumps({"state": "listening", "level": 0.5, "shimmer": True})
+    assert parse_line(line) == Update("listening", "", "", 0.0, 0.5)
+
+
 # ------------------------------------------------------------------- render
 
 
-def test_every_state_says_something():
+def test_every_state_says_something_when_text_is_on():
     for state in STATES:
         label = label_for(state)
         if state == "idle":
             assert label == ""  # idle is the pill being gone
         else:
             assert label, state
-
-
-def test_the_dot_colours_are_the_documented_ones():
-    assert color_for("listening") == "green"
-    assert color_for("finalizing") == "blue"
-    assert color_for("thinking") == "blue"
-    assert color_for("speaking") == "amber"
-    assert color_for("error") == "red"
-    # A statement, not activity: no dot.
-    assert color_for("sending") == ""
-    assert color_for("permission") == ""
-    assert color_for("idle") == ""
-
-
-def test_an_unknown_state_shows_nothing():
-    assert label_for("dancing") == ""
-    assert color_for("dancing") == ""
-    assert set(COLORS) == set(STATES)
 
 
 def test_the_default_wording():
@@ -119,7 +299,7 @@ def test_permission_without_a_message_still_makes_sense():
 def test_error_shows_the_remedy_verbatim():
     remedy = "Lost the microphone. Check your input device."
     assert label_for("error", remedy) == remedy
-    assert color_for("error") == "red"
+    assert dots_for("error").color == "red"
 
 
 def test_transient_states_take_themselves_down():
@@ -130,9 +310,11 @@ def test_transient_states_take_themselves_down():
     assert hold_for("thinking") == 0.0
 
 
-def test_render_returns_the_label_and_the_colour():
-    assert render(Update("listening")) == ("Listening", "green")
-    assert render(Update("idle")) == ("", "")
+def test_render_returns_the_label_and_the_pattern():
+    label, dots = render(Update("listening"))
+    assert (label, dots.motion) == ("Listening", "level")
+    label, dots = render(Update("idle"))
+    assert (label, dots.motion) == ("", "hidden")
 
 
 # ---------------------------------------------------------------- truncation
@@ -263,9 +445,9 @@ class Clock:
         return self.now
 
 
-async def _hud(*procs, clock=None):
+async def _hud(*procs, clock=None, **kwargs):
     spawner = Spawner(*procs)
-    hud = Hud(spawn=spawner, clock=clock or Clock())
+    hud = Hud(spawn=spawner, clock=clock or Clock(), **kwargs)
     await hud.start()
     return hud, spawner
 
@@ -391,6 +573,114 @@ async def test_a_hung_child_is_killed_on_stop():
     await asyncio.wait_for(hud.stop(), timeout=5)
     assert hung.stdin.closed is True
     assert hung.killed is True
+
+
+async def test_the_text_option_reaches_the_child(monkeypatch, tmp_path):
+    argv = []
+
+    async def fake_exec(*args, **kwargs):
+        argv.extend(args)
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    hud = Hud(text=True, log_path=tmp_path / "hud.log")
+    await hud.start()
+    await hud.stop()
+    assert "--text" in argv
+    assert "--position" in argv
+
+
+async def test_the_pill_is_wordless_by_default(monkeypatch, tmp_path):
+    argv = []
+
+    async def fake_exec(*args, **kwargs):
+        argv.extend(args)
+        return FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    hud = Hud(log_path=tmp_path / "hud.log")
+    await hud.start()
+    await hud.stop()
+    assert "--text" not in argv
+
+
+# ------------------------------------------------------------- level meter
+
+
+async def test_a_level_refreshes_the_listening_line():
+    hud, spawner = await _hud()
+    hud.set("listening", "add a login", "test")
+    hud.level(0.8)
+    await hud.idle()
+
+    # The words the live decoder put on that line survive the refresh: the
+    # meter is another field on the same line, not a line of its own.
+    assert spawner.procs[0].stdin.lines == [
+        {"state": "listening", "text": "add a login", "detail": "test"},
+        {
+            "state": "listening",
+            "text": "add a login",
+            "detail": "test",
+            "level": 0.8,
+        },
+    ]
+    await hud.stop()
+
+
+async def test_a_level_measured_after_listening_is_dropped():
+    # The recorder keeps measuring for as long as the microphone is open, and
+    # a level must never drag the pill back to a state it has left.
+    hud, spawner = await _hud()
+    hud.set("finalizing", "Finalizing")
+    hud.level(0.9)
+    await hud.idle()
+    assert [line["state"] for line in spawner.procs[0].stdin.lines] == ["finalizing"]
+    await hud.stop()
+
+
+async def test_a_level_before_anything_is_listening_is_dropped():
+    hud, spawner = await _hud()
+    hud.level(0.5)
+    await hud.idle()
+    assert spawner.procs[0].stdin.lines == []
+    await hud.stop()
+
+
+async def test_the_meter_is_throttled():
+    # Blocks arrive about thirty times a second and the meter goes out
+    # fifteen; the rest are dropped rather than queued.
+    clock = Clock()
+    hud, spawner = await _hud(clock=clock)
+    hud.set("listening", "Listening")
+    for _ in range(5):
+        hud.level(0.6)
+        clock.now += 0.02
+    await hud.idle()
+
+    levels = [line.get("level") for line in spawner.procs[0].stdin.lines[1:]]
+    assert levels == [0.6, 0.6]  # at 0.00 s and 0.08 s, not five times over
+    await hud.stop()
+
+
+async def test_silence_is_a_line_with_no_level_on_it():
+    # 0 is the default at the other end, so it costs a key rather than
+    # meaning something different.
+    hud, spawner = await _hud()
+    hud.set("listening", "Listening")
+    hud.level(0.0)
+    await hud.idle()
+    assert "level" not in spawner.procs[0].stdin.lines[-1]
+    await hud.stop()
+
+
+async def test_a_disabled_pill_measures_nothing():
+    spawner = Spawner()
+    hud = Hud(enabled=False, spawn=spawner)
+    await hud.start()
+    hud.set("listening")
+    hud.level(0.9)
+    await hud.idle()
+    assert spawner.count == 0
 
 
 # ------------------------------------------------------------ per-line hold

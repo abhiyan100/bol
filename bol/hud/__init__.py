@@ -1,4 +1,4 @@
-"""The pill: a small always-on-top label that says what Bol is doing.
+"""The pill: a small always-on-top capsule that says what Bol is doing.
 
 The window lives in a child process on purpose. AppKit in the daemon would
 drag a run loop and an app identity into a process whose whole job is to stay
@@ -20,15 +20,21 @@ from pathlib import Path
 
 from ..config import CONFIG_DIR
 from .render import (
-    COLORS,
     DEFAULTS,
+    DOT_COUNT,
+    DOTS,
     HOLD_S,
     STATES,
+    Dots,
     Update,
-    color_for,
+    animated,
+    clamp_level,
+    dot_alphas,
+    dots_for,
     draft_span,
     hold_for,
     label_for,
+    listening_dots,
     parse_line,
     render,
     tool_line,
@@ -37,15 +43,21 @@ from .render import (
 
 __all__ = [
     "Hud",
+    "Dots",
     "Update",
-    "COLORS",
     "DEFAULTS",
+    "DOTS",
+    "DOT_COUNT",
     "HOLD_S",
     "STATES",
-    "color_for",
+    "animated",
+    "clamp_level",
+    "dot_alphas",
+    "dots_for",
     "draft_span",
     "hold_for",
     "label_for",
+    "listening_dots",
     "parse_line",
     "render",
     "tool_line",
@@ -58,6 +70,10 @@ log = logging.getLogger("bol.hud")
 # decoration; a respawn loop competing with the mic is not.
 RESPAWN_S = 60.0
 POSITIONS = ("top", "bottom")
+# How often the microphone level is allowed down the pipe. Fast enough that
+# the meter looks like a voice and not a progress bar, slow enough that a
+# decoration never becomes the busiest thing on the event loop.
+LEVEL_HZ = 15.0
 
 
 class Hud:
@@ -72,12 +88,15 @@ class Hud:
         self,
         enabled: bool = True,
         position: str = "top",
+        text: bool = False,
         log_path: Path | None = None,
         spawn=None,
         clock=time.monotonic,
     ) -> None:
         self.enabled = bool(enabled)
         self.position = position if position in POSITIONS else "top"
+        # [ui] text: whether the child draws the current line beside the dots.
+        self.text = bool(text)
         self.log_path = Path(log_path) if log_path else CONFIG_DIR / "hud.log"
         # Injected in tests; None means "really start a child process".
         self._spawn = spawn
@@ -89,6 +108,12 @@ class Hud:
         self._last_respawn: float | None = None
         self._warned = False
         self._tasks: set = set()
+        # The last line sent, so a level can refresh the meter without
+        # wiping the words the live decoder put on the same line.
+        self._state = ""
+        self._text = ""
+        self._detail = ""
+        self._level_at: float | None = None
         # How long a child gets to exit after its stdin closes, before it is
         # killed. Shutdown must not hang on a stuck window.
         self._close_timeout = 2.0
@@ -114,7 +139,14 @@ class Hud:
 
     # ------------------------------------------------------------------ send
 
-    def set(self, state: str, text: str = "", detail: str = "", hold: float = 0.0) -> None:
+    def set(
+        self,
+        state: str,
+        text: str = "",
+        detail: str = "",
+        hold: float = 0.0,
+        level: float = 0.0,
+    ) -> None:
         """Put one line on the pill. Never raises, never blocks.
 
         hold overrides how long a transient state stays up, for this line
@@ -123,11 +155,39 @@ class Hud:
         """
         if not self.enabled or self._stopped or state not in STATES:
             return
+        self._state, self._text, self._detail = state, text, detail
+        # A new line restarts the meter's clock, so the first level after the
+        # microphone opens reaches the pill at once rather than a frame late.
+        self._level_at = None
+        self._send(state, text, detail, hold, level)
+
+    def level(self, value: float) -> None:
+        """Refresh the listening meter. Throttled to LEVEL_HZ; never raises.
+
+        This is a meter, not a message: it only ever refreshes a pill that is
+        already listening. A level measured while Bol is thinking is dropped
+        rather than dragging the pill back to a state it has left, which is
+        what makes it safe to wire straight to the recorder.
+        """
+        if not self.enabled or self._stopped or self._state != "listening":
+            return
+        now = self._clock()
+        if self._level_at is not None and now - self._level_at < 1.0 / LEVEL_HZ:
+            return
+        self._level_at = now
+        self._send("listening", self._text, self._detail, 0.0, value)
+
+    def _send(
+        self, state: str, text: str, detail: str, hold: float, level: float
+    ) -> None:
         payload = {"state": state, "text": text, "detail": detail}
         if hold:
             # Sent only when there is something to override, so the ordinary
             # line down the pipe stays exactly what it always was.
             payload["hold"] = float(hold)
+        meter = clamp_level(level)
+        if meter:
+            payload["level"] = round(meter, 3)
         line = json.dumps(payload) + "\n"
         if not self._write(line):
             self._respawn(line)
@@ -167,12 +227,11 @@ class Hud:
     async def _open(self):
         if self._spawn is not None:
             return await self._spawn()
+        argv = [sys.executable, "-m", "bol.hud.app", "--position", self.position]
+        if self.text:
+            argv.append("--text")
         return await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "bol.hud.app",
-            "--position",
-            self.position,
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=self._stderr(),
