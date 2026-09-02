@@ -26,7 +26,7 @@
         ▼                                                             │
   grammar.parse_transcript ──► Bridge (focused|tmux) ─paste+Enter─► Claude ─► HookServer :8770
    SEND / TYPE / DICTATE /       (title-gated)              Code       Stop / PostToolUse /
-   DISCARD / INTERRUPT / …                                             Notification (HTTP hooks)
+   DISCARD / INTERRUPT / ...                                             Notification (async hooks)
 ```
 
 ### Key decisions and their evidence
@@ -61,7 +61,7 @@ and flushed into the `StopEvent`, which is how the summarizer knows what
 Claude *did* rather than just what it *said*. The hook server answers `{}`
 immediately and processes in the background: Bol observes, never blocks.
 
-**Command words are grammar, not a model.** "send it", "type …", "close" are
+**Command words are grammar, not a model.** "send it", "type ...", "close" are
 matched by normalizing the utterance tail. A second intent model would add
 latency and a failure mode for zero benefit at this vocabulary size.
 
