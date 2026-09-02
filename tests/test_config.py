@@ -255,3 +255,14 @@ def test_two_configs_do_not_share_a_vocabulary_list():
     first, second = Config(), Config()
     first.vocabulary.words.append("Abhiyan")
     assert second.vocabulary.words == []
+
+
+def test_superseded_defaults_flags_the_old_hotkey_mode():
+    from bol.config import Config, superseded_defaults
+
+    cfg = Config()
+    assert superseded_defaults(cfg) == []
+    cfg.hotkey.mode = "push_to_talk"
+    (hint,) = superseded_defaults(cfg)
+    assert 'mode = "auto"' in hint
+    assert "push_to_talk" in hint

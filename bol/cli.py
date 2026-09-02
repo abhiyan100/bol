@@ -27,7 +27,13 @@ import subprocess
 import sys
 
 from . import __version__, install_hint
-from .config import CONFIG_PATH, hook_token, load_config, write_default_config
+from .config import (
+    CONFIG_PATH,
+    hook_token,
+    load_config,
+    superseded_defaults,
+    write_default_config,
+)
 from .hooks import installer
 
 # Probe results: (status, label, hint). The hint is printed only for failures,
@@ -702,6 +708,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     cfg = load_config()
     _quiet_model_libraries(cfg)
+    for hint in superseded_defaults(cfg):
+        print(f"bol: {hint}")
     if not installer.installed(_url(cfg)):
         print("bol: hooks not installed, running `bol hook install` for you.")
         installer.uninstall(_base_url(cfg))  # drop stale token-less entries
@@ -841,7 +849,10 @@ def cmd_setup(_args: argparse.Namespace) -> int:
 
     existed = CONFIG_PATH.exists()
     path = write_default_config()
-    print(f"config: {'already at' if existed else 'written to'} {path}\n")
+    print(f"config: {'already at' if existed else 'written to'} {path}")
+    for hint in superseded_defaults(cfg):
+        print(f"  note: {hint}")
+    print()
 
     ok = _setup_models(cfg)
     ok = _setup_wake(cfg) and ok

@@ -419,6 +419,27 @@ port = 8770
 """
 
 
+# Defaults that changed after a release. A config file written by `bol setup`
+# spells every value out, so an older file keeps pinning the old behavior
+# forever unless someone says so. (section, key, old default, new default,
+# one-line reason). Shown once at startup, never applied automatically.
+SUPERSEDED_DEFAULTS = (
+    ("hotkey", "mode", "push_to_talk", "auto", "tap to talk, hold for push-to-talk"),
+)
+
+
+def superseded_defaults(cfg: Config) -> list[str]:
+    """Hints for values in cfg that equal a default an older Bol wrote."""
+    hints = []
+    for section, key, old, new, why in SUPERSEDED_DEFAULTS:
+        if getattr(getattr(cfg, section), key) == old:
+            hints.append(
+                f'[{section}] {key} = "{old}" is the old default; '
+                f'set {key} = "{new}" for {why} ({CONFIG_PATH})'
+            )
+    return hints
+
+
 def write_default_config() -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not CONFIG_PATH.exists():
