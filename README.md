@@ -63,7 +63,12 @@ Every phrase is yours to change under `[wake]` and `[commands]`.
 other direction: when Claude Code finishes a turn, Bol speaks a short
 summary of what it did, flags failures, and reads permission prompts to
 you. A local 1B model writes the summary; the voice is macOS `say` or
-Kokoro. Codex CLI talk-back is next.
+Kokoro.
+
+Talk-back works with Claude Code and Codex CLI. `bol setup` wires whichever
+of the two is installed, and Bol names the one it is narrating, so a Codex
+turn is reported as Codex. Codex asks you once to review and trust the new
+hooks; accept it when it appears.
 
 ## How it works
 
@@ -167,11 +172,11 @@ Every step falls back to the text before it.
 - The hook server binds `127.0.0.1` only, with a random 128-bit token in
   `~/.config/bol/hook_token` (mode 0600). Non-loopback hosts are refused
   unless you opt in.
-- `bol setup` adds three hooks to `~/.claude/settings.json`, each a
-  background `curl` to loopback that never fails, so Claude Code never
-  waits on Bol and stays quiet when Bol is off. Setup shows the entry
-  first, writes atomically, keeps a one-time backup. `bol hook uninstall`
-  removes them.
+- `bol setup` adds three hooks to `~/.claude/settings.json` and, when Codex
+  CLI is installed, three more to `~/.codex/hooks.json`, each a background
+  `curl` to loopback that never fails, so the agent never waits on Bol and
+  stays quiet when Bol is off. Setup shows the entry first, writes
+  atomically, keeps a one-time backup. `bol hook uninstall` removes them.
 - Bol pastes; it never presses Enter on its own. Your clipboard is restored
   after every paste. `[bridge] anywhere = false` limits pastes to terminals
   and IDEs.

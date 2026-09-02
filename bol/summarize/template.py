@@ -1,7 +1,10 @@
 """Tier-0 summarizer: free, instant, deterministic.
 
-Builds the spoken reply from the tool log + Claude's own last message. No
+Builds the spoken reply from the tool log + the agent's own last message. No
 network, no model. Covers the common case; the persona LLM is optional polish.
+
+Which agent it names comes from the event, so a Codex turn is never reported
+as Claude's.
 """
 
 from __future__ import annotations
@@ -10,13 +13,15 @@ import re
 from collections import Counter
 
 from ..config import Config
-from ..hooks.events import StopEvent, ToolUse
+from ..hooks.events import StopEvent, ToolUse, display_name
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s")
 _MARKDOWN_NOISE = re.compile(r"[*_`#>|]+")
 _CODE_BLOCK = re.compile(r"```.*?```", re.DOTALL)
 
-_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+# apply_patch is how Codex edits a file; events.py gives it the touched path
+# as its detail, so it belongs with the rest of the edit tools here.
+_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit", "apply_patch"}
 _READ_TOOLS = {"Read", "Grep", "Glob", "LS"}
 
 # A markdown table or a log dump has no sentence punctuation, so the split
@@ -75,12 +80,13 @@ class TemplateSummarizer:
         self._name = cfg.summarizer.user_name
 
     async def summarize(self, event: StopEvent) -> str:
+        agent = display_name(event.agent)
         activity = describe_tools(event.tools)
         gist = _spoken(event.last_assistant_message)
         pieces = [p for p in (activity.capitalize() if activity else "", gist) if p]
         if not pieces:
-            body = "Claude's done, but it didn't say much."
+            body = f"{agent}'s done, but it didn't say much."
         else:
             body = ". ".join(pieces).rstrip(".") + "."
-        ask = f"What should Claude do next{', ' + self._name if self._name else ''}?"
+        ask = f"What should {agent} do next{', ' + self._name if self._name else ''}?"
         return f"{body} {ask}"

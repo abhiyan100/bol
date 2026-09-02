@@ -47,7 +47,7 @@ from .bridge.focused import SubmitBlocked
 from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
 from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
-from .hooks import HookServer, TurnTracker
+from .hooks import HookServer, TurnTracker, display_name
 from .hotkey import HotkeyListener, MouseListener
 from .hud import Hud, tool_line
 from .llm import LLMEngine
@@ -245,14 +245,18 @@ class Daemon:
         self._ptt_session = None
         self._asleep = False
         self._last_reply = ""
-        # Claude Code hooks are user-scoped, so every session on this machine
-        # posts here. Bol latches onto one (see [server] follow).
+        # Agent hooks are user-scoped, so every session on this machine posts
+        # here. Bol latches onto one (see [server] follow).
         self._bound_session: str | None = None
         self._bound_cwd = ""
         self._warned_other_session = False
         # Which session raised the permission prompt we're waiting on, so a
         # spoken "yes" can never approve a different session's prompt.
         self._permission_session: str | None = None
+        # Which agent Bol is narrating, and therefore the name every sentence
+        # built at runtime uses. Claude Code until a hook event says Codex;
+        # the session it follows is the one that decides.
+        self._agent = "claude"
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -263,6 +267,9 @@ class Daemon:
         self.server.on("Stop", self._on_stop)
         self.server.on("PostToolUse", self._on_tool)
         self.server.on("Notification", self._on_notification)
+        # Codex's stand-in for Notification. One endpoint, one daemon: both
+        # agents can be wired at once and the payload says which spoke.
+        self.server.on("PermissionRequest", self._on_permission_request)
         await self.server.start()
         loop = asyncio.get_running_loop()
         # Two-way only, and in the background; template/raw fallbacks cover
@@ -327,11 +334,25 @@ class Daemon:
             if self.engine is not None:
                 await self.engine.stop()
 
+    @property
+    def agent_name(self) -> str:
+        """What Bol calls the agent it is narrating, out loud and on screen."""
+        return display_name(self._agent)
+
+    def _bind_agent(self, agent: str) -> None:
+        """Remember which agent this event came from, for the words Bol uses."""
+        if agent and agent != self._agent:
+            log.info("narrating %s", display_name(agent))
+            self._agent = agent
+
     def mode_line(self) -> str:
         """The one line that says which half of Bol is running."""
         if self.talk_back:
             return "bol: two-way (talk-back on)."
-        return "bol: one-way (dictation). Add --talk-back to hear what Claude did."
+        return (
+            "bol: one-way (dictation). Add --talk-back to hear what "
+            f"{self.agent_name} did."
+        )
 
     async def _warm_speech_model(self) -> None:
         """Load the speech model, with the pill saying so.
@@ -505,7 +526,7 @@ class Daemon:
                 self._pending_paste = False
                 self.hud.set("sending", "Sent")
                 self._cue("done")
-                print("bol: sent. Claude's turn.")
+                print(f"bol: sent. {self.agent_name}'s turn.")
             else:
                 await self._keys("C-u", explicit=True)
                 self._pending_paste = False
@@ -514,13 +535,16 @@ class Daemon:
                 print("bol: scratched that.")
         except SubmitBlocked as exc:
             # The paste is still there and still unsent, so the flag stays up
-            # and saying it again once Claude is in front will work.
+            # and saying it again once the agent is in front will work.
             log.info("submit withheld: %s", exc)
             await self._speak(
-                "That window doesn't look like Claude, so I didn't press Enter."
+                f"That window doesn't look like {self.agent_name}, "
+                "so I didn't press Enter."
             )
         except BridgeError as exc:
-            await self._speak(f"Couldn't reach Claude: {exc}", state="error")
+            await self._speak(
+                f"Couldn't reach {self.agent_name}: {exc}", state="error"
+            )
 
     def _go_to_sleep(self) -> None:
         """Stop hearing trigger words until the next hotkey press.
@@ -893,17 +917,19 @@ class Daemon:
             return await self._apply(self.grammar.parse(text))
         except SubmitBlocked as exc:
             # The text WAS typed; only the Enter was withheld. Which is
-            # exactly a pending paste, and saying "send it" once Claude is in
-            # front is now the way to finish it.
+            # exactly a pending paste, and saying "send it" once the agent is
+            # in front is now the way to finish it.
             log.info("submit withheld: %s", exc)
             self._pending_paste = True
             await self._speak(
-                "Typed it, but that window doesn't look like Claude, "
+                f"Typed it, but that window doesn't look like {self.agent_name}, "
                 "so I didn't press Enter."
             )
             return True
         except BridgeError as exc:
-            await self._speak(f"Couldn't reach Claude: {exc}", state="error")
+            await self._speak(
+                f"Couldn't reach {self.agent_name}: {exc}", state="error"
+            )
             return True
 
     async def _answer_permission(self, approve: bool) -> bool:
@@ -916,7 +942,8 @@ class Daemon:
         self._permission_session = None
         if not self._follows(session):
             await self._speak(
-                "That prompt came from another Claude Code session, so I left it alone."
+                f"That prompt came from another {self.agent_name} session, "
+                "so I left it alone."
             )
             return True
         if approve:
@@ -977,10 +1004,10 @@ class Daemon:
             self._pending_paste = False
             self.hud.set("sending", "Sent")
             self._cue("done")
-            print("bol: sent. Claude's turn.")
+            print(f"bol: sent. {self.agent_name}'s turn.")
             return False
         if action is Action.DISCARD:
-            # C-u wipes Claude Code's input line. The user said so, so it is
+            # C-u wipes the agent's input line. The user said so, so it is
             # allowed outside a terminal too, where the bridge turns it into
             # the one Cmd+Z that undoes the paste.
             await self._keys("C-u", explicit=True)
@@ -1035,12 +1062,12 @@ class Daemon:
     def _follows(self, session_id: str, cwd: str = "") -> bool:
         """Whether this hook event belongs to the session Bol is narrating.
 
-        Claude Code hooks are user-scoped, so a second `claude` in another
-        terminal posts here too. Left unfiltered, each session's Stop cuts the
-        previous summary off mid-sentence and reopens the mic, and a "yes"
-        meant for one prompt approves whichever terminal is frontmost. Bol
-        latches onto the first session it hears from; [server] follow = "all"
-        opts back into narrating every session.
+        Agent hooks are user-scoped, so a second `claude` (or a `codex`) in
+        another terminal posts here too. Left unfiltered, each session's Stop
+        cuts the previous summary off mid-sentence and reopens the mic, and a
+        "yes" meant for one prompt approves whichever terminal is frontmost.
+        Bol latches onto the first session it hears from, whichever agent that
+        is; [server] follow = "all" opts back into narrating every session.
         """
         if self.cfg.server.follow == "all" or not session_id:
             return True
@@ -1056,7 +1083,7 @@ class Daemon:
         if not self._warned_other_session:
             self._warned_other_session = True
             print(
-                "bol: another Claude Code session is running; Bol is only "
+                "bol: another agent session is running; Bol is only "
                 f"narrating {self._session_label()}."
             )
         log.debug("ignoring hook event from session %s", session_id)
@@ -1083,38 +1110,58 @@ class Daemon:
     async def _on_tool(self, payload: dict) -> None:
         # Recorded for every session: the tracker is bounded, and the Stop
         # handler is where the session filter decides who gets narrated.
-        tool = self.tracker.record_tool(payload)
+        # A Codex PostToolUse carries no agent marker of its own, so the
+        # agent already being narrated is what it is attributed to.
+        tool = self.tracker.record_tool(payload, self._agent)
         if self._shows(payload.get("session_id", "")):
             self.hud.set("thinking", "Thinking", tool_line(tool.tool_name, tool.detail))
 
     async def _on_stop(self, payload: dict) -> None:
         # Always finish the turn, even for a session we ignore, so its tool
         # log is drained rather than left behind.
-        event = self.tracker.finish_turn(payload)
+        event = self.tracker.finish_turn(payload, self._agent)
         if not self._follows(event.session_id, event.cwd):
             return
+        self._bind_agent(event.agent)
         if self.summarizer is None:
-            # One-way: Claude's turn is over and there is nothing to say
-            # about it, so the pill stops saying Thinking.
+            # One-way: the turn is over and there is nothing to say about it,
+            # so the pill stops saying Thinking.
             self._idle_pill()
             return
         reply = await self.summarizer.summarize(event)
         await self._speak(reply)
 
     async def _on_notification(self, payload: dict) -> None:
-        note = self.tracker.notification(payload)
+        note = self.tracker.notification(payload, self._agent)
         if not self._follows(note.session_id):
             return
+        self._bind_agent(note.agent)
         if note.notification_type == "permission_prompt":
-            # Armed in both modes: the answer is a keystroke, not speech, so
-            # "go ahead" works whether or not Bol reads the question aloud.
-            self._permission_session = note.session_id
-            msg = note.message or "Claude needs your permission."
-            await self._speak(
-                f"{msg} Say 'go ahead' or 'no'.", state="permission", pill=msg
+            await self._ask_permission(
+                note.session_id, note.message or f"{self.agent_name} needs your permission."
             )
         elif note.notification_type in {"idle_prompt", "agent_needs_input"}:
-            await self._speak(note.message or "Claude's waiting on you.")
+            await self._speak(note.message or f"{self.agent_name}'s waiting on you.")
+
+    async def _on_permission_request(self, payload: dict) -> None:
+        """Codex is about to ask for approval. Same flow as Claude's prompt.
+
+        Codex has no Notification event, so this is the only place a Codex
+        prompt can be read aloud, and the only place "go ahead" gets armed.
+        """
+        note = self.tracker.permission_request(payload)
+        if not self._follows(note.session_id, payload.get("cwd", "")):
+            return
+        self._bind_agent(note.agent)
+        await self._ask_permission(note.session_id, note.message)
+
+    async def _ask_permission(self, session_id: str, message: str) -> None:
+        # Armed in both modes: the answer is a keystroke, not speech, so
+        # "go ahead" works whether or not Bol reads the question aloud.
+        self._permission_session = session_id
+        await self._speak(
+            f"{message} Say 'go ahead' or 'no'.", state="permission", pill=message
+        )
 
     # ---------------------------------------------------------------- text mode
 

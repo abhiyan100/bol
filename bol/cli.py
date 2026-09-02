@@ -5,7 +5,7 @@
   bol run --talk-back  ... and hear what Claude did
   bol run --text       text mode, the same loop typed instead of spoken
   bol setup            first run: download models, install hooks, check permissions
-  bol hook install     add Bol's hooks to Claude Code settings (user scope)
+  bol hook install     add Bol's hooks to Claude Code (--agent codex for Codex CLI)
   bol hook uninstall   remove them
   bol doctor           check environment, permissions, and wiring
   bol config           write the default config file and print its path
@@ -53,6 +53,21 @@ def _url(cfg) -> str:
     return f"{_base_url(cfg)}?token={hook_token()}"
 
 
+def detected_agents() -> list[str]:
+    """Every coding agent Bol can wire that is actually installed here.
+
+    Hooks are per agent and Bol talks back for both, so setup and doctor look
+    at PATH rather than assuming Claude Code. With neither on PATH the answer
+    is still Claude Code: setup should write the hooks the user is about to
+    need, not nothing at all.
+    """
+    return _agents_on_path() or ["claude"]
+
+
+def _agents_on_path() -> list[str]:
+    return [a for a in installer.AGENTS if shutil.which(installer.AGENT_CLI[a])]
+
+
 def _print_rows(rows: list[tuple[str, str, str]]) -> bool:
     """Print probe rows, return True when nothing failed."""
     ok = True
@@ -83,9 +98,14 @@ def probe_system(cfg) -> list[tuple[str, str, str]]:
             "Parakeet needs Apple Silicon; `bol run --text` still works elsewhere",
         ),
         (
-            OK if shutil.which("claude") else BAD,
-            "claude CLI on PATH",
-            "npm install -g @anthropic-ai/claude-code (https://code.claude.com)",
+            OK if _agents_on_path() else BAD,
+            "agent CLI on PATH: "
+            + (
+                ", ".join(installer.AGENT_LABELS[a] for a in _agents_on_path())
+                or "none found"
+            ),
+            "npm install -g @anthropic-ai/claude-code (https://code.claude.com), "
+            "or install Codex CLI",
         ),
         (
             OK if shutil.which("say") else BAD,
@@ -181,15 +201,21 @@ def probe_packages(cfg) -> list[tuple[str, str, str]]:
 
 def probe_wiring(cfg) -> list[tuple[str, str, str]]:
     rows = []
-    try:
-        hooks_ok = installer.installed(_url(cfg))
-    except SystemExit as exc:
-        rows.append((BAD, "hooks: Claude Code settings unreadable", str(exc)))
-    else:
+    url = _url(cfg)
+    # One row per agent installed on this machine: hooks live in a different
+    # file for each, and wiring one says nothing about the other.
+    for agent in detected_agents():
+        label = installer.AGENT_LABELS[agent]
+        try:
+            hooks_ok = installer.installed(url, agent=agent)
+        except SystemExit as exc:
+            rows.append((BAD, f"hooks: {label} settings unreadable", str(exc)))
+            continue
         rows.append((
             OK if hooks_ok else BAD,
-            "hooks installed (user scope)",
-            "bol hook install (or just run `bol run`, it installs them)",
+            f"hooks installed for {label} (user scope)",
+            f"bol hook install --agent {agent} "
+            "(or just run `bol run`, it installs them)",
         ))
     # A missing config file is normal: every key has a default.
     if CONFIG_PATH.exists():
@@ -736,12 +762,18 @@ def cmd_run(args: argparse.Namespace) -> int:
     _quiet_model_libraries(cfg)
     for hint in removed_keys():
         print(f"bol: {hint}")
-    if not installer.installed(_url(cfg)):
-        print("bol: hooks not installed, running `bol hook install` for you.")
-        installer.uninstall(_base_url(cfg))  # drop stale token-less entries
-        installer.install(_url(cfg))
+    missing = [a for a in detected_agents() if not installer.installed(_url(cfg), agent=a)]
+    if missing:
+        names = ", ".join(installer.AGENT_LABELS[a] for a in missing)
+        print(f"bol: hooks not installed for {names}, doing it for you.")
+        for agent in missing:
+            # Drop stale token-less entries first.
+            installer.uninstall(_base_url(cfg), agent=agent)
+            installer.install(_url(cfg), agent=agent)
+            if agent == "codex":
+                print(f"bol: {installer.CODEX_TRUST_NOTE}")
         print(
-            "bol: note, Claude Code sessions started before this need a "
+            "bol: note, agent sessions started before this need a "
             "restart to pick up hooks."
         )
     _warn_missing_weights(cfg)
@@ -834,14 +866,24 @@ def _warn_missing_weights(cfg) -> None:
 def cmd_hook(args: argparse.Namespace) -> int:
     cfg = load_config()
     url = _url(cfg)
+    agent = getattr(args, "agent", "claude")
+    label = installer.AGENT_LABELS[agent]
+    scope = args.scope
+    if agent == "codex" and scope == "project":
+        # Codex reads one hooks file. A repo-local copy would be written and
+        # then never read, which is worse than saying so.
+        print("bol: Codex reads ~/.codex/hooks.json only, so using user scope.")
+        scope = "user"
     if args.hook_cmd == "install":
-        if args.scope == "project":
+        if scope == "project":
             print(installer.PROJECT_SCOPE_WARNING)
-        path = installer.install(url, scope=args.scope)
+        path = installer.install(url, scope=scope, agent=agent)
         print(f"bol: hooks installed in {path}")
-        print("bol: restart running Claude Code sessions to pick them up.")
+        if agent == "codex":
+            print(f"bol: {installer.CODEX_TRUST_NOTE}")
+        print(f"bol: restart running {label} sessions to pick them up.")
     elif args.hook_cmd == "uninstall":
-        path = installer.uninstall(url, scope=args.scope)
+        path = installer.uninstall(url, scope=scope, agent=agent)
         print(f"bol: hooks removed from {path}")
     return 0
 
@@ -999,18 +1041,38 @@ def _setup_wake(cfg) -> bool:
 
 
 def _setup_hooks(cfg) -> None:
-    """Show the exact entry going into settings.json, then write it."""
+    """Show the exact entry going into each agent's file, then write it.
+
+    Every agent whose CLI is on PATH gets wired, so a machine with both
+    Claude Code and Codex CLI ends up with one Bol narrating whichever
+    session speaks first.
+    """
     url = _url(cfg)
     shown = url.split("?", 1)[0] + "?token=<your local token>"
-    entry = {"matcher": "*", "hooks": [installer.bol_hook(shown)]}
-    path = installer.settings_path("user")
-    print(f"hooks: adding one entry per event to {path}")
-    print(f"  events: {', '.join(installer.EVENTS)} (matcher only on PostToolUse)")
-    for line in json.dumps(entry, indent=2).splitlines():
-        print(f"  {line}")
-    print("  async, so Claude never waits on Bol; silent when Bol is not running.")
-    installer.install(url)
-    print("hooks installed. Restart running Claude Code sessions to pick them up.")
+    wired = []
+    for agent in detected_agents():
+        label = installer.AGENT_LABELS[agent]
+        path = installer.settings_path("user", agent=agent)
+        entry: dict = {"hooks": [installer.bol_hook(shown, agent)]}
+        note = ""
+        if agent == "claude":
+            entry = {"matcher": "*", **entry}
+            note = " (matcher only on PostToolUse)"
+        print(f"hooks: adding one entry per event to {path}")
+        print(f"  events: {', '.join(installer.events_for(agent))}{note}")
+        for line in json.dumps(entry, indent=2).splitlines():
+            print(f"  {line}")
+        print(
+            f"  async, so {label} never waits on Bol; silent when Bol is not running."
+        )
+        if agent == "codex":
+            print(f"  {installer.CODEX_TRUST_NOTE}")
+        installer.install(url, agent=agent)
+        wired.append(label)
+    print(
+        f"hooks installed for {' and '.join(wired)}. "
+        "Restart running sessions to pick them up."
+    )
 
 
 def cmd_doctor(_args: argparse.Namespace) -> int:
@@ -1065,9 +1127,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_setup.set_defaults(func=cmd_setup)
 
-    p_hook = sub.add_parser("hook", help="manage Claude Code hooks")
+    p_hook = sub.add_parser("hook", help="manage Claude Code and Codex CLI hooks")
     p_hook.add_argument("hook_cmd", choices=["install", "uninstall"])
     p_hook.add_argument("--scope", choices=["user", "project"], default="user")
+    p_hook.add_argument(
+        "--agent",
+        choices=list(installer.AGENTS),
+        default="claude",
+        help="which agent to wire (default: claude)",
+    )
     p_hook.set_defaults(func=cmd_hook)
 
     p_doc = sub.add_parser("doctor", help="check environment and wiring")
