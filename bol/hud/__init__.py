@@ -1,0 +1,249 @@
+"""The pill: a small always-on-top label that says what Bol is doing.
+
+The window lives in a child process on purpose. AppKit in the daemon would
+drag a run loop and an app identity into a process whose whole job is to stay
+out of the way: the daemon must never become the frontmost app, or the paste
+lands in the wrong window. So the daemon owns a pipe, not a window.
+
+The client below is the daemon's half. It never raises and never blocks the
+event loop: a dead child costs one skipped line, not a wedged hotkey.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+
+from ..config import CONFIG_DIR
+from .render import (
+    COLORS,
+    DEFAULTS,
+    HOLD_S,
+    STATES,
+    Update,
+    color_for,
+    hold_for,
+    label_for,
+    parse_line,
+    render,
+    tool_line,
+    truncate_middle,
+)
+
+__all__ = [
+    "Hud",
+    "Update",
+    "COLORS",
+    "DEFAULTS",
+    "HOLD_S",
+    "STATES",
+    "color_for",
+    "hold_for",
+    "label_for",
+    "parse_line",
+    "render",
+    "tool_line",
+    "truncate_middle",
+]
+
+log = logging.getLogger("bol.hud")
+
+# A child that keeps dying gets retried at most this often. The pill is
+# decoration; a respawn loop competing with the mic is not.
+RESPAWN_S = 60.0
+POSITIONS = ("top", "bottom")
+
+
+class Hud:
+    """Client for the pill child process.
+
+    `set()` is synchronous by design: it is called from the hotkey callback,
+    where the pill has to appear on the keystroke rather than after whatever
+    the loop gets to next.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = True,
+        position: str = "top",
+        log_path: Path | None = None,
+        spawn=None,
+        clock=time.monotonic,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.position = position if position in POSITIONS else "top"
+        self.log_path = Path(log_path) if log_path else CONFIG_DIR / "hud.log"
+        # Injected in tests; None means "really start a child process".
+        self._spawn = spawn
+        self._clock = clock
+        self._proc = None
+        self._log_file = None
+        self._started = False
+        self._stopped = False
+        self._last_respawn: float | None = None
+        self._warned = False
+        self._tasks: set = set()
+        # How long a child gets to exit after its stdin closes, before it is
+        # killed. Shutdown must not hang on a stuck window.
+        self._close_timeout = 2.0
+
+    # ------------------------------------------------------------- lifecycle
+
+    async def start(self) -> None:
+        if not self.enabled or self._stopped or self._started:
+            return
+        self._started = True
+        await self._launch()
+
+    async def stop(self) -> None:
+        self._stopped = True
+        await self.idle()
+        await self._close_proc()
+        self._close_log()
+
+    async def idle(self) -> None:
+        """Wait for queued drains and respawns to finish."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    # ------------------------------------------------------------------ send
+
+    def set(self, state: str, text: str = "", detail: str = "") -> None:
+        """Put one line on the pill. Never raises, never blocks."""
+        if not self.enabled or self._stopped or state not in STATES:
+            return
+        line = json.dumps({"state": state, "text": text, "detail": detail}) + "\n"
+        if not self._write(line):
+            self._respawn(line)
+
+    def _write(self, line: str) -> bool:
+        stdin = getattr(self._proc, "stdin", None)
+        if stdin is None:
+            return False
+        try:
+            stdin.write(line.encode("utf-8"))
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError, RuntimeError):
+            return False
+        self._track(self._drain(stdin))
+        return True
+
+    async def _drain(self, stdin) -> None:
+        drain = getattr(stdin, "drain", None)
+        if drain is None:
+            return
+        try:
+            await drain()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError, RuntimeError):
+            # The child is gone. The next set() notices on its own write and
+            # decides whether a respawn is due.
+            pass
+
+    # --------------------------------------------------------------- process
+
+    async def _launch(self) -> None:
+        try:
+            self._proc = await self._open()
+        except Exception as exc:  # a missing python, a read-only log dir, ...
+            self._proc = None
+            log.debug("could not start the pill: %s", exc)
+            self._unavailable()
+
+    async def _open(self):
+        if self._spawn is not None:
+            return await self._spawn()
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "bol.hud.app",
+            "--position",
+            self.position,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=self._stderr(),
+        )
+
+    def _stderr(self):
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file = open(self.log_path, "a", buffering=1)
+        except OSError:
+            return asyncio.subprocess.DEVNULL
+        return self._log_file
+
+    def _close_log(self) -> None:
+        handle, self._log_file = self._log_file, None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+
+    def _respawn(self, line: str) -> None:
+        """Bring the child back, at most once a minute, and resend the line."""
+        if not self._started or self._stopped:
+            return
+        now = self._clock()
+        if self._last_respawn is not None and now - self._last_respawn < RESPAWN_S:
+            self._unavailable()
+            return
+        self._last_respawn = now
+        loop = self._loop()
+        if loop is None:
+            return
+        self._track(self._respawn_and_write(line))
+
+    async def _respawn_and_write(self, line: str) -> None:
+        await self._close_proc()
+        await self._launch()
+        self._write(line)
+
+    async def _close_proc(self) -> None:
+        proc, self._proc = self._proc, None
+        if proc is None:
+            return
+        stdin = getattr(proc, "stdin", None)
+        if stdin is not None:
+            try:
+                stdin.close()
+            except (BrokenPipeError, ConnectionResetError, OSError, ValueError, RuntimeError):
+                pass
+        wait = getattr(proc, "wait", None)
+        if wait is None:
+            return
+        try:
+            await asyncio.wait_for(wait(), timeout=self._close_timeout)
+        except Exception:
+            kill = getattr(proc, "kill", None)
+            if kill is not None:
+                try:
+                    kill()
+                except (OSError, ProcessLookupError):
+                    pass
+
+    # ----------------------------------------------------------------- misc
+
+    def _loop(self):
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+    def _track(self, coro) -> None:
+        """Run a coroutine in the background, keeping a reference to it."""
+        loop = self._loop()
+        if loop is None:
+            coro.close()
+            return
+        task = loop.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _unavailable(self) -> None:
+        if self._warned:
+            return
+        self._warned = True
+        log.info("pill unavailable, continuing without it")

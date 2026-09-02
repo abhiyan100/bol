@@ -78,7 +78,7 @@ class TurnTracker:
     def __init__(self) -> None:
         self._tools: OrderedDict[str, list[ToolUse]] = OrderedDict()
 
-    def record_tool(self, payload: dict) -> None:
+    def record_tool(self, payload: dict) -> ToolUse:
         key = payload.get("prompt_id") or payload.get("session_id") or "?"
         tools = self._tools.get(key)
         if tools is None:
@@ -90,13 +90,15 @@ class TurnTracker:
         if len(tools) >= MAX_TOOLS_PER_TURN:
             del tools[0]
         tool_input = payload.get("tool_input") or {}
-        tools.append(
-            ToolUse(
-                tool_name=payload.get("tool_name", "?"),
-                detail=_tool_detail(tool_input if isinstance(tool_input, dict) else {}),
-                ok=_tool_ok(payload.get("tool_response")),
-            )
+        use = ToolUse(
+            tool_name=payload.get("tool_name", "?"),
+            detail=_tool_detail(tool_input if isinstance(tool_input, dict) else {}),
+            ok=_tool_ok(payload.get("tool_response")),
         )
+        tools.append(use)
+        # Returned so a caller can show what Claude just did without parsing
+        # the payload a second time.
+        return use
 
     def finish_turn(self, payload: dict) -> StopEvent:
         key = payload.get("prompt_id") or payload.get("session_id") or "?"

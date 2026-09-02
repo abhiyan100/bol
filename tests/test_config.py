@@ -47,6 +47,8 @@ def test_the_default_file_matches_the_dataclasses():
         assert getattr(cfg.hotkey, key) == value, key
     for key, value in data["audio"].items():
         assert getattr(cfg.audio, key) == value, key
+    for key, value in data["ui"].items():
+        assert getattr(cfg.ui, key) == value, key
 
 
 def test_load_config_applies_the_new_fields(tmp_path):
@@ -67,6 +69,48 @@ def test_load_config_applies_the_new_fields(tmp_path):
     assert cfg.hotkey.auto_send_min_words == 5
     assert cfg.audio.pre_roll_ms == 500
     assert cfg.audio.warm_s == 30
+
+
+def test_ui_defaults():
+    cfg = Config()
+    assert cfg.ui.pill is True
+    assert cfg.ui.sounds is True
+    assert cfg.ui.position == "top"
+
+
+def test_sound_cues_still_reads_and_writes_the_new_home():
+    # Old code (and old muscle memory) says cfg.sound_cues; it has to keep
+    # meaning exactly what [ui] sounds means.
+    cfg = Config()
+    assert cfg.sound_cues is True
+    cfg.sound_cues = False
+    assert cfg.ui.sounds is False
+    cfg.ui.sounds = True
+    assert cfg.sound_cues is True
+
+
+def test_an_old_config_file_keeps_working(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("sound_cues = false\n")
+    cfg = load_config(path)
+    assert cfg.ui.sounds is False
+    assert cfg.sound_cues is False
+
+
+def test_the_ui_section_wins_over_the_old_alias(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('sound_cues = false\n[ui]\nsounds = true\npill = false\n')
+    cfg = load_config(path)
+    assert cfg.ui.sounds is True
+    assert cfg.ui.pill is False
+
+
+def test_load_config_reads_the_ui_section(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[ui]\npill = false\nposition = "bottom"\n')
+    cfg = load_config(path)
+    assert cfg.ui.pill is False
+    assert cfg.ui.position == "bottom"
 
 
 def test_load_config_without_a_file_is_all_defaults(tmp_path):
@@ -111,6 +155,18 @@ def test_validate_rejects_an_unknown_submit():
     message = str(err.value)
     assert "always" in message
     assert "auto" in message and "voice" in message
+
+
+def test_validate_rejects_an_unknown_pill_position():
+    cfg = Config()
+    cfg.ui.position = "middle"
+
+    with pytest.raises(ValueError) as err:
+        validate_config(cfg)
+
+    message = str(err.value)
+    assert "middle" in message
+    assert "top" in message and "bottom" in message
 
 
 def test_the_daemon_validates_at_startup():

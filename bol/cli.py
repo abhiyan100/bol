@@ -195,8 +195,20 @@ def probe_wiring(cfg) -> list[tuple[str, str, str]]:
             "(`bol config` writes one)",
             "",
         ))
+    rows.append(probe_pill(cfg))
     rows.append(probe_port(cfg))
     return rows
+
+
+def probe_pill(cfg) -> tuple[str, str, str]:
+    """The on-screen pill. Informational: Bol runs fine without it."""
+    if not cfg.ui.pill:
+        return (INFO, 'pill: off ([ui] pill = false)', "")
+    try:
+        __import__("AppKit")
+    except Exception:
+        return (INFO, "pill: AppKit not importable, sound cues only", "")
+    return (INFO, "pill: available", "")
 
 
 def probe_port(cfg) -> tuple[str, str, str]:

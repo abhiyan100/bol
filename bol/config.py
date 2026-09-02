@@ -143,6 +143,20 @@ class ServerConfig:
 
 
 @dataclass
+class UiConfig:
+    # The on-screen pill that says what Bol is doing (listening, thinking,
+    # speaking, and what went wrong). Runs as its own tiny window process.
+    pill: bool = True
+    # Audible blips when listening starts and stops.
+    sounds: bool = True
+    # Which edge of the active screen the pill sits on.
+    position: str = "top"  # top | bottom
+
+
+UI_POSITIONS = ("top", "bottom")
+
+
+@dataclass
 class Config:
     # Voice-command phrase overrides: {"send": [...], "type": [...],
     # "discard": [...], "sleep": [...], "interrupt": [...], "repeat": [...],
@@ -157,12 +171,21 @@ class Config:
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
+    ui: UiConfig = field(default_factory=UiConfig)
     # After Bol speaks a reply, automatically open the mic for the next
     # instruction. Off by default: with [hotkey] submit = "auto" a mic that
     # reopens unasked can send whatever the room said next, and a tap is
     # instant anyway.
     hands_free: bool = False
-    sound_cues: bool = True
+
+    @property
+    def sound_cues(self) -> bool:
+        """Deprecated alias for [ui] sounds. Old config files still work."""
+        return self.ui.sounds
+
+    @sound_cues.setter
+    def sound_cues(self, value: bool) -> None:
+        self.ui.sounds = bool(value)
 
     @property
     def api_key(self) -> str:
@@ -183,13 +206,17 @@ def load_config(path: Path | None = None) -> Config:
     if path.exists():
         with open(path, "rb") as f:
             data = tomllib.load(f)
+        # The old top-level sound_cues, applied first so an explicit
+        # [ui] sounds in the same file still wins.
+        if "sound_cues" in data:
+            cfg.sound_cues = data["sound_cues"]
         for name in (
             "audio", "stt", "hotkey", "tts", "llm", "cleanup", "summarizer",
-            "bridge", "server",
+            "bridge", "server", "ui",
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
-        for name in ("hands_free", "sound_cues", "commands"):
+        for name in ("hands_free", "commands"):
             if name in data:
                 setattr(cfg, name, data[name])
     return cfg
@@ -210,6 +237,7 @@ def validate_config(cfg: Config) -> None:
     """
     _one_of("[hotkey] mode", cfg.hotkey.mode, HOTKEY_MODES)
     _one_of("[hotkey] submit", cfg.hotkey.submit, SUBMIT_MODES)
+    _one_of("[ui] position", cfg.ui.position, UI_POSITIONS)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -219,7 +247,11 @@ DEFAULT_CONFIG_TOML = """\
 # submit = "auto" below, a mic that reopens unasked can send whatever the room
 # said next, and tapping the hotkey is instant anyway.
 hands_free = false
-sound_cues = true    # audible blips when listening starts/stops
+
+[ui]
+pill = true            # the on-screen pill that shows what Bol is doing
+sounds = true          # audible blips when listening starts/stops
+position = "top"       # which edge the pill sits on: "top" | "bottom"
 
 [hotkey]
 mode = "auto"          # tap or hold, whichever you did | "push_to_talk" | "toggle"

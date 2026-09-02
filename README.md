@@ -98,7 +98,10 @@ or just stop talking, and the text lands in the window you are looking at
 and is sent. **Hold** it instead for push-to-talk: release to send. The mic
 is live on the keystroke, with 300 ms of pre-roll, so the first word is never
 lost. Anything under three words is pasted without Enter, so a stray "yes"
-never reaches Claude unread. Voice commands ride on your speech:
+never reaches Claude unread. A small pill at the top of the screen shows
+what Bol is doing: Listening, Finalizing, Sent, Thinking with the tool Claude
+is running, the permission question, what Bol is saying, and any error with
+its fix. It never takes focus. Voice commands ride on your speech:
 
 | You say | Bol does |
 |---|---|
@@ -151,6 +154,11 @@ auto_send_min_words = 3      # shorter text is pasted, not sent
 input_device = ""            # name substring or index; empty = system default
 pre_roll_ms = 300            # audio kept from before the keystroke
 warm_s = 120                 # mic stays open this long after use (orange dot)
+
+[ui]
+pill = true                  # on-screen state pill; false = sound cues only
+sounds = true
+position = "top"             # or "bottom"
 
 [tts]
 engine = "kokoro"            # neural voice instead of `say`

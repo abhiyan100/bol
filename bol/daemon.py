@@ -27,6 +27,7 @@ from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker
 from .hotkey import HotkeyListener
+from .hud import Hud, tool_line
 from .llm import LLMEngine
 from .speak import build_speaker, play_cue
 from .stt import build_transcriber
@@ -71,6 +72,9 @@ class Daemon:
         self.recorder = Recorder(cfg.audio)
         self.transcriber = None if text_mode else build_transcriber(cfg)
         self.hotkey: HotkeyListener | None = None
+        # The on-screen pill. Inert until start(), and every call on it is a
+        # no-op when the child is missing.
+        self.hud = Hud(enabled=cfg.ui.pill, position=cfg.ui.position)
 
         self._listen_lock = asyncio.Lock()
         # Hook handlers run as independent tasks; without this a Stop and a
@@ -130,6 +134,10 @@ class Daemon:
         except Exception as exc:
             log.warning("could not prepare the microphone: %s", exc)
 
+        # Started before the key is armed so the very first press has a pill
+        # to appear on.
+        await self.hud.start()
+
         self.hotkey = HotkeyListener(
             self.cfg.hotkey, self._hotkey_pressed, self._hotkey_released
         )
@@ -144,6 +152,7 @@ class Daemon:
             await asyncio.Event().wait()
         finally:
             self.hotkey.stop()
+            await self.hud.stop()
             await self.recorder.close()
             await self.server.stop()
             await self.engine.stop()
@@ -151,6 +160,9 @@ class Daemon:
     # ---------------------------------------------------------------- listening
 
     def _hotkey_pressed(self) -> None:
+        # First line on purpose: the pill has to appear on the keystroke, not
+        # after the mic, the prewarm, or anything else this press starts.
+        self.hud.set("listening", "Listening")
         self._asleep = False
         # Warm the KV cache for the next LLM call while the user speaks:
         # api mode cleans the transcript first; local mode's next call is
@@ -260,19 +272,26 @@ class Daemon:
                 # grabbing the mic) used to surface only as an unretrieved
                 # task exception, leaving the hotkey silently dead forever.
                 log.warning("capture failed: %s", exc)
-                await self._speak("Lost the microphone. Check your input device.")
+                await self._speak(
+                    "Lost the microphone. Check your input device.", state="error"
+                )
                 return False
             if audio is None:
                 log.debug("no speech captured")
+                self.hud.set("idle")
                 return False
+            # The mic is closed and the words are on their way to the model:
+            # say so, because this is the part with a wait in it.
+            self.hud.set("finalizing", "Finalizing")
             assert self.transcriber is not None
             try:
                 text = await self.transcriber.transcribe(audio, self.cfg.audio.sample_rate)
             except Exception as exc:
                 log.warning("transcription failed: %s", exc)
-                await self._speak("Couldn't transcribe that one. Try again.")
+                await self._speak("Couldn't transcribe that one. Try again.", state="error")
                 return False
             if not text:
+                self.hud.set("idle")
                 return False
             print(f"you: {text}")
             return await self._handle_utterance(text)
@@ -323,7 +342,7 @@ class Daemon:
             )
             return True
         except BridgeError as exc:
-            await self._speak(f"Couldn't reach Claude: {exc}")
+            await self._speak(f"Couldn't reach Claude: {exc}", state="error")
             return True
 
     async def _answer_permission(self, approve: bool) -> bool:
@@ -341,9 +360,11 @@ class Daemon:
             return True
         if approve:
             await self.bridge.inject_keys("Enter")
+            self.hud.set("sending", "Approved")
             print("bol: approved.")
             return False
         await self.bridge.inject_keys("Escape")
+        self.hud.set("sending", "Denied")
         print("bol: denied.")
         return True
 
@@ -390,16 +411,21 @@ class Daemon:
             await self.bridge.inject(
                 text + " " if action is Action.DICTATE else text, submit=False
             )
+            # The words are in Claude's box where the user can see them, so
+            # the pill has nothing left to say.
+            self.hud.set("idle")
             return True
         if action is Action.SEND:
             self._permission_session = None
             await self.bridge.inject(text, submit=True)
+            self.hud.set("sending", "Sent")
             self._cue("done")
             print("bol: sent. Claude's turn.")
             return False
         if action is Action.DISCARD:
             # C-u wipes Claude Code's input line.
             await self.bridge.inject_keys("C-u")
+            self.hud.set("idle")
             self._cue("discard")
             return True
         if action is Action.INTERRUPT:
@@ -408,6 +434,7 @@ class Daemon:
             return True
         if action is Action.SLEEP:
             self._asleep = True
+            self.hud.set("idle")
             print("bol: sleeping. Press the hotkey when you need me.")
             return False
         if action is Action.REPEAT:
@@ -416,13 +443,21 @@ class Daemon:
             return True
         return False
 
-    async def _speak(self, text: str) -> None:
+    async def _speak(self, text: str, state: str = "speaking", pill: str = "") -> None:
         # Serialized so two hook handlers can't cut each other off; barge-in
         # still works because the hotkey calls speaker.stop() directly.
         async with self._speak_lock:
             self._last_reply = text
             print(f"bol: {text}")
-            await self.speaker.speak(text)
+            self.hud.set(state, pill or text)
+            try:
+                await self.speaker.speak(text)
+            finally:
+                # An error and a permission question stay on screen: one is a
+                # remedy to read, the other a question still waiting for its
+                # answer. Both leave on their own, or on the next state.
+                if state == "speaking":
+                    self.hud.set("idle")
 
     # ---------------------------------------------------------------- sessions
 
@@ -456,6 +491,17 @@ class Daemon:
         log.debug("ignoring hook event from session %s", session_id)
         return False
 
+    def _shows(self, session_id: str) -> bool:
+        """Whether the pill may show this event. Read-only on purpose.
+
+        _follows() latches Bol onto a session, and that decision belongs to
+        the Stop handler. A tool event arriving first must never be what
+        binds Bol to a session it was never asked to narrate.
+        """
+        if self.cfg.server.follow == "all" or not session_id:
+            return True
+        return self._bound_session in (None, session_id)
+
     def _session_label(self) -> str:
         if self._bound_cwd:
             return Path(self._bound_cwd).name or self._bound_cwd
@@ -466,7 +512,9 @@ class Daemon:
     async def _on_tool(self, payload: dict) -> None:
         # Recorded for every session: the tracker is bounded, and the Stop
         # handler is where the session filter decides who gets narrated.
-        self.tracker.record_tool(payload)
+        tool = self.tracker.record_tool(payload)
+        if self._shows(payload.get("session_id", "")):
+            self.hud.set("thinking", "Thinking", tool_line(tool.tool_name, tool.detail))
 
     async def _on_stop(self, payload: dict) -> None:
         # Always finish the turn, even for a session we ignore, so its tool
@@ -485,7 +533,9 @@ class Daemon:
         if note.notification_type == "permission_prompt":
             self._permission_session = note.session_id
             msg = note.message or "Claude needs your permission."
-            await self._speak(f"{msg} Say 'go ahead' or 'no'.")
+            await self._speak(
+                f"{msg} Say 'go ahead' or 'no'.", state="permission", pill=msg
+            )
             await self._auto_listen()
         elif note.notification_type in {"idle_prompt", "agent_needs_input"}:
             await self._speak(note.message or "Claude's waiting on you.")

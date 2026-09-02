@@ -128,6 +128,18 @@ energy and hysteresis on release. The hotkey listener checks pynput's
 `IS_TRUSTED` after start and raises a clear Input Monitoring error instead
 of silently never firing.
 
+**The pill is a separate process.** State on screen (listening, finalizing,
+thinking with the running tool, permission, speaking, error with its remedy)
+is drawn by `bol/hud/app.py`, a PyObjC child fed JSON lines over stdin. Not
+in-process AppKit: an app-policy NSApplication becomes the frontmost app,
+and the focused bridge would then refuse to paste into "Python". The child
+uses the accessory activation policy, a borderless non-activating panel that
+ignores the mouse and joins every space, and never asks to become key. A
+crash there can never take the microphone down; the daemon respawns it at
+most once a minute and continues without it if AppKit is missing. The pill
+is set on the keystroke, before any await, so it is the first thing that
+happens when the key goes down.
+
 **Summarizer always has a floor.** The deterministic template over the tool
 log + Claude's final message is free, instant, and covers failure flagging.
 The LLM persona (local or api) always falls back to it on error or timeout:
@@ -150,6 +162,8 @@ STT provider protocol especially.
 | `bol/bridge/base.py` | Bridge protocol + auto-selection |
 | `bol/bridge/focused.py` | Frontmost-app paste injection with terminal allowlist |
 | `bol/bridge/tmux.py` | Pane discovery/pinning/verification, paste injection, key sends |
+| `bol/hud/` | On-screen pill: `Hud` client, AppKit child (`app.py`), pure render table |
+| `bol/mlx_thread.py` | The one thread every in-process MLX model runs on |
 | `bol/hooks/server.py` | Loopback aiohttp receiver for hook events |
 | `bol/hooks/events.py` | Typed payload views + per-turn tool accumulation |
 | `bol/hooks/installer.py` | Idempotent settings.json hook install/uninstall |

@@ -73,6 +73,29 @@ class FakeSummarizer:
         return f"summary of {event.session_id}"
 
 
+class FakeHud:
+    """The pill, without a window: it just records what it was told to show."""
+
+    def __init__(self, order=None):
+        self.calls = []
+        self.order = order
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+    def set(self, state, text="", detail=""):
+        self.calls.append((state, text, detail))
+        if self.order is not None:
+            self.order.append(f"pill:{state}")
+
+    @property
+    def states(self):
+        return [state for state, _text, _detail in self.calls]
+
+
 def _daemon(utterances, texts, submit="voice"):
     cfg = Config()
     cfg.sound_cues = False
@@ -85,6 +108,7 @@ def _daemon(utterances, texts, submit="voice"):
     d.transcriber = FakeTranscriber(texts)
     d.bridge = FakeBridge()
     d.speaker = FakeSpeaker()
+    d.hud = FakeHud()
     return d
 
 
@@ -128,9 +152,9 @@ async def test_release_before_record_stops_only_its_session():
     session = d.recorder.begin()
     session.request_stop()  # released before the mic opened
     await d._listen_session(session, until_silence=False)
-    # The stopped session yields no audio and nothing is injected…
+    # The stopped session yields no audio and nothing is injected...
     assert d.bridge.injected == []
-    # …and a FRESH session is unaffected by the stale stop.
+    # ...and a FRESH session is unaffected by the stale stop.
     assert not d.recorder.begin().stopped
 
 
@@ -210,10 +234,10 @@ async def test_permission_from_a_foreign_session_never_presses_enter():
             "message": "Claude wants to run rm -rf.",
         }
     )
-    # Session B's prompt was never announced, so nothing is armed…
+    # Session B's prompt was never announced, so nothing is armed...
     assert d._permission_session is None
     reopen = await d._handle_utterance("yes")
-    # …and "yes" is plain dictation, not an approval keystroke.
+    # ...and "yes" is plain dictation, not an approval keystroke.
     assert ("Enter",) not in d.bridge.keys
     assert reopen is True
 
@@ -501,3 +525,135 @@ async def test_a_finished_recording_clears_the_tap_state():
 def test_hands_free_is_off_by_default():
     # With auto-send on, a mic that reopens unasked can send room noise.
     assert Config().hands_free is False
+
+
+# ------------------------------------------------------------------ the pill
+
+
+@pytest.mark.asyncio
+async def test_the_pill_shows_listening_on_the_keystroke():
+    # The whole point of the pill: the user presses the key and sees it, with
+    # nothing (prewarm, mic, TTS stop) allowed in front.
+    order = []
+    d = _daemon(1, ["add a login test"])
+    d.cfg.hands_free = False
+    d.recorder = OrderedRecorder(order)
+    d.hud = FakeHud(order)
+
+    d._hotkey_pressed()
+
+    assert order == ["pill:listening"]
+    assert d.hud.calls[0] == ("listening", "Listening", "")
+
+    await asyncio.sleep(0.05)  # let the press's own tasks finish
+    assert order[:3] == ["pill:listening", "record", "pill:finalizing"]
+
+
+@pytest.mark.asyncio
+async def test_the_pill_says_finalizing_then_clears_after_a_paste():
+    d = _daemon(1, ["add a login test"])
+    d.cfg.hands_free = False
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    # The words are in Claude's box now, so the pill has nothing left to say.
+    assert d.hud.states == ["finalizing", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_the_pill_says_sent_when_the_turn_goes_to_claude():
+    d = _daemon(1, ["ship it send"])
+    await d._handle_utterance("ship it send")
+    assert d.hud.calls == [("sending", "Sent", "")]
+
+
+@pytest.mark.asyncio
+async def test_the_pill_shows_the_tool_claude_just_ran():
+    d = _hook_daemon()
+    await d._on_tool(
+        {
+            "session_id": "A",
+            "prompt_id": "p-A",
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest -q"},
+            "tool_response": {},
+        }
+    )
+    assert d.hud.calls[-1] == ("thinking", "Thinking", "Bash: pytest -q")
+
+
+@pytest.mark.asyncio
+async def test_another_sessions_tool_never_reaches_the_pill():
+    d = _hook_daemon()
+    await d._on_stop(_stop("A"))  # Bol latches onto session A
+    d.hud.calls.clear()
+
+    await d._on_tool(
+        {
+            "session_id": "B",
+            "prompt_id": "p-B",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rm -rf /"},
+            "tool_response": {},
+        }
+    )
+
+    assert d.hud.calls == []
+    # And the pill's read of the session never binds Bol to one.
+    assert d._bound_session == "A"
+
+
+@pytest.mark.asyncio
+async def test_a_permission_prompt_becomes_a_question_on_the_pill():
+    d = _hook_daemon()
+    await d._on_notification(
+        {
+            "hook_event_name": "Notification",
+            "session_id": "A",
+            "notification_type": "permission_prompt",
+            "message": "Claude wants to run rm -rf build.",
+        }
+    )
+    # The pill keeps the question, not the whole spoken sentence, and it
+    # stays up: there is an answer outstanding.
+    assert d.hud.calls == [("permission", "Claude wants to run rm -rf build.", "")]
+
+
+@pytest.mark.asyncio
+async def test_the_pill_follows_bol_speaking_and_then_clears():
+    d = _hook_daemon()
+    await d._speak("Tests pass, all thirty of them.")
+    assert d.hud.calls == [
+        ("speaking", "Tests pass, all thirty of them.", ""),
+        ("idle", "", ""),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_mic_failure_turns_the_pill_red_and_leaves_it_up():
+    d = _daemon(1, ["add a login test"])
+    d.recorder = ExplodingRecorder(1)
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert d.hud.calls == [("error", "Lost the microphone. Check your input device.", "")]
+    # No idle behind it: the remedy has to stay readable, and the pill takes
+    # itself down after three seconds.
+    assert "idle" not in d.hud.states
+
+
+@pytest.mark.asyncio
+async def test_a_transcription_failure_turns_the_pill_red():
+    class DeafTranscriber(FakeTranscriber):
+        async def transcribe(self, audio, sample_rate):
+            raise RuntimeError("model went away")
+
+    d = _daemon(1, ["unused"])
+    d.transcriber = DeafTranscriber([])
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert d.hud.calls == [
+        ("finalizing", "Finalizing", ""),
+        ("error", "Couldn't transcribe that one. Try again.", ""),
+    ]
