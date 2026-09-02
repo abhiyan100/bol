@@ -405,7 +405,7 @@ key = "alt_r"          # right Option. Hold it, talk, let go, and what you said 
 #   your Mac. Nothing is recorded or sent anywhere. Expect the occasional
 #   false wake from TV or conversation; a false wake costs a Listening pill,
 #   and nothing is sent unless you say a send phrase.
-# Turn your wifi off and try it: it still works. `bol setup` downloads the
+# Bol itself needs no internet (your coding agent does). `bol setup` downloads the
 # 5 MB keyword model. Set enabled = false to close the microphone and keep
 # the hotkey, which works the same either way.
 enabled = true

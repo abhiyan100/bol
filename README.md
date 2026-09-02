@@ -168,7 +168,9 @@ Every step falls back to the text before it.
 ## Security and privacy
 
 - The keyword model, VAD, speech recognition, cleanup, and (with talk-back)
-  the summarizer and voice all run on your Mac. Turn wifi off and try it.
+  the summarizer and voice all run on your Mac. Bol itself needs no
+  internet: dictate into Notes with wifi off and it still works. Your
+  coding agent, of course, needs its own connection.
 - The hook server binds `127.0.0.1` only, with a random 128-bit token in
   `~/.config/bol/hook_token` (mode 0600). Non-loopback hosts are refused
   unless you opt in.
