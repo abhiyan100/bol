@@ -18,6 +18,8 @@ from __future__ import annotations
 import logging
 import re
 
+from . import mlx_thread
+
 log = logging.getLogger("bol.cleanup")
 
 CLEANUP_SYSTEM = """\
@@ -100,14 +102,14 @@ class TunedCleaner:
     async def warmup(self) -> None:
         import asyncio
 
-        await asyncio.to_thread(self._load)
+        await mlx_thread.run(self._load)
 
     async def clean(self, text: str, deadline_s: float) -> str:
         import asyncio
 
         try:
             out = await asyncio.wait_for(
-                asyncio.to_thread(self._generate, text), timeout=deadline_s
+                mlx_thread.run(self._generate, text), timeout=deadline_s
             )
         except Exception as exc:
             log.debug("tuned cleanup skipped (%s)", exc)

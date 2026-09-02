@@ -12,6 +12,7 @@ import logging
 import numpy as np
 import sounddevice as sd
 
+from .. import mlx_thread
 from ..config import Config
 from .base import clamp_speech
 
@@ -31,7 +32,7 @@ class KokoroSpeaker:
         if self._model is None:
             from mlx_audio.tts.utils import load_model
 
-            log.info("loading Kokoro model %s…", self._cfg.tts.kokoro_model)
+            log.info("loading Kokoro model %s ...", self._cfg.tts.kokoro_model)
             self._model = load_model(self._cfg.tts.kokoro_model)
         return self._model
 
@@ -51,7 +52,7 @@ class KokoroSpeaker:
 
     async def speak(self, text: str) -> None:
         async with self._lock:
-            audio, rate = await asyncio.to_thread(self._generate, clamp_speech(text))
+            audio, rate = await mlx_thread.run(self._generate, clamp_speech(text))
             if audio.size == 0:
                 return
             self._playing = True

@@ -106,7 +106,7 @@ class HookServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
-        log.info("hook server on http://%s:%d/hook", self._host, self._port)
+        log.debug("hook server on http://%s:%d/hook", self._host, self._port)
 
     async def stop(self) -> None:
         if self._runner:

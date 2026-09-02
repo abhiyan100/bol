@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .. import mlx_thread
 from ..config import Config
 
 log = logging.getLogger("bol.stt")
@@ -34,11 +35,11 @@ class ParakeetTranscriber:
 
     async def warmup(self) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._ensure_model)
+            await mlx_thread.run(self._ensure_model)
 
     async def transcribe(self, audio: np.ndarray, sample_rate: int) -> str:
         async with self._lock:
-            return await asyncio.to_thread(self._transcribe, audio, sample_rate)
+            return await mlx_thread.run(self._transcribe, audio, sample_rate)
 
     def _transcribe(self, audio: np.ndarray, sample_rate: int) -> str:
         # parakeet-mlx takes a file path; hand it a temp 16-bit PCM WAV.

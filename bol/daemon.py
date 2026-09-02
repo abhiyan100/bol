@@ -107,7 +107,7 @@ class Daemon:
         print(f"bol: hook server on http://{self.cfg.server.host}:{self.cfg.server.port}/hook")
 
         if self.transcriber is not None:
-            print("bol: warming up speech model…")
+            print("bol: warming up speech model ...")
             await self.transcriber.warmup()
 
         if self.text_mode or self.transcriber is None:

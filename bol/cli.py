@@ -550,6 +550,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             pass
 
     cfg = load_config()
+    _quiet_model_libraries(cfg)
     if not installer.installed(_url(cfg)):
         print("bol: hooks not installed, running `bol hook install` for you.")
         installer.uninstall(_base_url(cfg))  # drop stale token-less entries
@@ -588,6 +589,44 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"bol: {exc}")
         return 1
     return 0
+
+
+# Third-party loggers that narrate every HTTP request at INFO. Bol's own
+# `bol.*` loggers stay at INFO so the user still sees model loads and hooks.
+NOISY_LOGGERS = ("httpx", "httpcore", "huggingface_hub", "urllib3", "filelock", "hf_xet")
+
+
+def _quiet_model_libraries(cfg) -> None:
+    """Keep the daemon's terminal readable and its startup offline.
+
+    Progress bars belong in `bol setup`, not in a running daemon. And once
+    every model this config needs is on disk there is no reason to ask the
+    Hub about it on each start: offline mode skips the HEAD requests, the
+    rate-limit warning, and works with the wifi off. Both are only defaults;
+    an explicit HF_HUB_* in the environment wins. The env vars also reach the
+    mlx_lm.server child, which inherits them.
+    """
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        from .llm.engine import hf_available, weights_cached
+    except Exception:
+        return
+    if not hf_available():
+        return
+    models = installed_models(cfg)
+    if models and all(weights_cached(repo) for _role, repo in models):
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        # huggingface_hub read the environment when it was imported (the cache
+        # check above imported it), so mirror the decision onto its constants.
+        try:
+            from huggingface_hub import constants
+
+            constants.HF_HUB_OFFLINE = os.environ["HF_HUB_OFFLINE"] == "1"
+            constants.HF_HUB_DISABLE_PROGRESS_BARS = (
+                os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+            )
+        except Exception:
+            pass
 
 
 def _warn_missing_weights(cfg) -> None:
@@ -823,6 +862,9 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(name)s: %(message)s",
     )
+    if not args.verbose:
+        for name in NOISY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.WARNING)
     return args.func(args)
 
 

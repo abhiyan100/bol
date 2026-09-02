@@ -1,6 +1,7 @@
 """CLI surface: exit codes, the doctor report, and clean startup errors."""
 
 import errno
+import os
 import sys
 import types
 
@@ -139,3 +140,40 @@ def test_wanted_models_follows_the_config():
     cfg.cleanup.mode = "off"
     cfg.tts.engine = "kokoro"
     assert cli.wanted_models(cfg) == [("voice", cfg.tts.kokoro_model)]
+
+
+def test_quiet_model_libraries_goes_offline_when_everything_is_cached(monkeypatch):
+    import bol.llm.engine as engine
+
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    monkeypatch.setattr(engine, "hf_available", lambda: True)
+    monkeypatch.setattr(engine, "weights_cached", lambda repo: True)
+    monkeypatch.setattr(cli, "installed_models", lambda cfg: [("summaries", "x/y")])
+    cli._quiet_model_libraries(Config())
+    assert os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] == "1"
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+
+
+def test_quiet_model_libraries_stays_online_when_a_model_is_missing(monkeypatch):
+    import bol.llm.engine as engine
+
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setattr(engine, "hf_available", lambda: True)
+    monkeypatch.setattr(engine, "weights_cached", lambda repo: repo != "missing/one")
+    monkeypatch.setattr(
+        cli, "installed_models", lambda cfg: [("summaries", "x/y"), ("cleanup", "missing/one")]
+    )
+    cli._quiet_model_libraries(Config())
+    assert "HF_HUB_OFFLINE" not in os.environ
+
+
+def test_quiet_model_libraries_respects_an_explicit_choice(monkeypatch):
+    import bol.llm.engine as engine
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(engine, "hf_available", lambda: True)
+    monkeypatch.setattr(engine, "weights_cached", lambda repo: True)
+    monkeypatch.setattr(cli, "installed_models", lambda cfg: [("summaries", "x/y")])
+    cli._quiet_model_libraries(Config())
+    assert os.environ["HF_HUB_OFFLINE"] == "0"

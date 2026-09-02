@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 @dataclass
 class ToolUse:
     tool_name: str
-    detail: str  # short human-readable target (file path, command, …)
+    detail: str  # short human-readable target (file path, command, ...)
     ok: bool
 
 
