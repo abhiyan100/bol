@@ -7,6 +7,10 @@
 [![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black.svg)](#install)
 [bol-voice.vercel.app](https://bol-voice.vercel.app)
 
+[![Bol in 30 seconds: say type, talk, say send it](docs/media/bol-launch.gif)](https://github.com/abhiyan100/bol/releases/download/v0.5.0/bol-launch.mp4)
+
+[Watch with sound](https://github.com/abhiyan100/bol/releases/download/v0.5.0/bol-launch.mp4) (31 s, 4 MB).
+
 Say "type" and talk. Pause, and the words land where your cursor is. Say
 "send it" and Enter is pressed. Bol listens from the moment it starts, runs
 every model on your Mac, and sends nothing anywhere. Turn on talk-back and
