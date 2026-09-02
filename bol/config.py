@@ -15,7 +15,13 @@ CONFIG_PATH = CONFIG_DIR / "config.toml"
 class AudioConfig:
     sample_rate: int = 16000
     channels: int = 1
-    # Energy-gate endpointing: stop capture after this much trailing silence.
+    # Which speech gate decides that a hands-free turn is over.
+    # silero: Silero v6, a real voice-activity model (ships with Bol).
+    # energy: RMS against an adaptive noise floor. Cheaper, and fooled by a
+    #         keyboard, a fan, or anyone else in the room.
+    # silero falls back to energy on its own if it cannot be loaded.
+    vad: str = "silero"  # silero | energy
+    # Endpointing: stop capture after this much trailing silence.
     silence_ms: int = 900
     # Hands-free only: utterances shorter than this are discarded as noise.
     # Push-to-talk returns everything captured while the key is held.
@@ -23,7 +29,8 @@ class AudioConfig:
     max_utterance_s: int = 90
     # Hands-free reopen: give up if no speech starts within this window.
     listen_window_s: int = 8
-    # RMS multiplier over measured noise floor that counts as speech.
+    # Energy gate only: RMS multiplier over the measured noise floor that
+    # counts as speech. Ignored when vad = "silero".
     energy_threshold: float = 3.0
     # Mic to record from: device index or name substring; empty = system default.
     input_device: str = ""
@@ -48,9 +55,12 @@ class SttConfig:
     # documented default of (256, 256) holds every word back for 20 seconds.
     # (256, 16) commits after 1.3 s; (256, 8) is faster and slightly less sure.
     stream_context: list = field(default_factory=lambda: [256, 16])
-    # Audio handed to the streaming decoder per step. Smaller updates the pill
-    # more often and costs more decodes per second.
-    stream_chunk_ms: int = 320
+    # Audio handed to the streaming decoder per step. Smaller redraws the pill
+    # more often AND makes it wronger: parakeet-mlx spends the first encoder
+    # frame of every step on a window seam and commits that frame, so a short
+    # step commits a larger share of garbage. See bol/stt/parakeet.py. Floored
+    # at MIN_CHUNK_MS there; below ~320 ms the live text stops being readable.
+    stream_chunk_ms: int = 640
 
 
 @dataclass
@@ -72,6 +82,7 @@ class HotkeyConfig:
 
 HOTKEY_MODES = ("auto", "push_to_talk", "toggle")
 SUBMIT_MODES = ("auto", "voice")
+VAD_MODES = ("silero", "energy")
 
 
 @dataclass
@@ -112,6 +123,17 @@ class CleanupConfig:
     # Bol's own tuned cleanup model (HF repo or local path), used after the
     # deterministic rules when mlx-lm is installed. Empty = rules only.
     model: str = "abhiyan10/bol-cleanup-350m-4bit"
+
+
+@dataclass
+class VocabularyConfig:
+    # Words the transcriber gets close to but not quite right: your name,
+    # your project, a library nobody outside your terminal has heard of.
+    # A token (or a pair of tokens) within one edit of an entry is replaced
+    # with the entry, spelled exactly as it is written here. Common English
+    # words are never touched, and entries shorter than five characters only
+    # ever fix capitalization, because a wrong correction is worse than none.
+    words: list = field(default_factory=list)
 
 
 @dataclass
@@ -179,6 +201,7 @@ class Config:
     tts: TtsConfig = field(default_factory=TtsConfig)
     llm: LlmConfig = field(default_factory=LlmConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
+    vocabulary: VocabularyConfig = field(default_factory=VocabularyConfig)
     summarizer: SummarizerConfig = field(default_factory=SummarizerConfig)
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -222,8 +245,8 @@ def load_config(path: Path | None = None) -> Config:
         if "sound_cues" in data:
             cfg.sound_cues = data["sound_cues"]
         for name in (
-            "audio", "stt", "hotkey", "tts", "llm", "cleanup", "summarizer",
-            "bridge", "server", "ui",
+            "audio", "stt", "hotkey", "tts", "llm", "cleanup", "vocabulary",
+            "summarizer", "bridge", "server", "ui",
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
@@ -249,6 +272,7 @@ def validate_config(cfg: Config) -> None:
     _one_of("[hotkey] mode", cfg.hotkey.mode, HOTKEY_MODES)
     _one_of("[hotkey] submit", cfg.hotkey.submit, SUBMIT_MODES)
     _one_of("[ui] position", cfg.ui.position, UI_POSITIONS)
+    _one_of("[audio] vad", cfg.audio.vad, VAD_MODES)
 
 
 DEFAULT_CONFIG_TOML = """\
@@ -279,6 +303,7 @@ auto_send_min_words = 3  # shorter than this is pasted, not sent; "send it" stil
 
 [audio]
 # input_device = "MacBook Pro Microphone"  # mic name substring or index; empty = system default
+vad = "silero"         # what decides you stopped talking: Silero v6 | "energy" (RMS only)
 pre_roll_ms = 300      # audio kept from just before the press, so no clipped first word
 warm_s = 120           # hold the mic stream open this long after a recording, then let it go
 
@@ -289,7 +314,9 @@ live = true            # show words in the pill while you talk (display only)
 #                             # half is how long a word waits before it is committed,
 #                             # so parakeet-mlx's own default of [256, 256] would
 #                             # hold your text back for 20 seconds. [256, 8] is faster.
-# stream_chunk_ms = 320       # audio per streaming decode; smaller redraws more often
+# stream_chunk_ms = 640       # audio per streaming decode. Smaller redraws more
+#                             # often and reads worse: each step commits one bad
+#                             # frame from parakeet-mlx's window seam. Floor 320.
 
 [tts]
 engine = "say"         # or "kokoro" (pip install 'bol[kokoro]')
@@ -307,6 +334,13 @@ local_model = "mlx-community/LFM2.5-1.2B-Instruct-4bit"
 [cleanup]
 mode = "on_command"    # say "clean it up" | "always" | "off"
 model = "abhiyan10/bol-cleanup-350m-4bit"  # Bol's own 195MB model; "" = rules only
+
+[vocabulary]
+# Words Bol should spell your way: your name, your project, a library the
+# transcriber has never met. A dictated word within one edit of an entry is
+# replaced with the entry, exactly as written. Common English words are left
+# alone. Bol always knows the usual tool names (Claude Code, GitHub, uv).
+words = []             # e.g. ["Abhiyan", "Poudel", "Parakeet", "Kokoro"]
 
 [summarizer]
 engine = "auto"        # llm persona when available, template otherwise

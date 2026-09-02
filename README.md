@@ -155,6 +155,10 @@ auto_send_min_words = 3      # shorter text is pasted, not sent
 input_device = ""            # name substring or index; empty = system default
 pre_roll_ms = 300            # audio kept from before the keystroke
 warm_s = 120                 # mic stays open this long after use (orange dot)
+vad = "silero"               # decides when you stopped talking; "energy" = fallback
+
+[vocabulary]
+words = ["Abhiyan", "Kokoro", "pyproject"]   # names Bol should spell right
 
 [ui]
 pill = true                  # on-screen state pill; false = sound cues only
@@ -186,7 +190,10 @@ broken, summaries come from the deterministic template and dictation goes in
 raw. The loop never breaks because a model hiccuped.
 
 Cleanup is deliberately conservative. Deterministic rules (fillers, stutters,
-spoken tokens like "dash dash verbose") run first. Then
+spoken tokens like "dash dash verbose") run first, then a spelling pass:
+tool names Bol knows ("cloud code" to Claude Code, "git hub" to GitHub,
+"pie test" to pytest) and your own `[vocabulary]` words, matched within one
+or two edits and never against common English words. Then
 [bol-cleanup-350m](https://huggingface.co/abhiyan10/bol-cleanup-350m-4bit),
 **Bol's own model**, polishes grammar in 40 to 100 ms: a 195 MB fine-tune
 trained for exactly this job, because generic 1B-class local models silently

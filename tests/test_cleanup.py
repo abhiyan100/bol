@@ -1,6 +1,6 @@
 import pytest
 
-from bol.cleanup import clean_transcript, deterministic_clean
+from bol.cleanup import apply_vocabulary, clean_transcript, deterministic_clean
 
 
 class FakeEngine:
@@ -97,3 +97,118 @@ async def test_runaway_rewrite_rejected():
 @pytest.mark.asyncio
 async def test_tiny_input_untouched():
     assert await clean_transcript(FakeEngine(reply="X"), "hi", 2.0, use_llm=True) == "hi"
+
+
+# ------------------------------------------------------------------ vocabulary
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("open claude code and look at auth.py", "open Claude Code and look at auth.py"),
+        ("cloud code keeps crashing", "Claude Code keeps crashing"),
+        ("Claude Code is already right", "Claude Code is already right"),
+        ("push it to git hub", "push it to GitHub"),
+        ("check github actions", "check GitHub actions"),
+        ("ask codex to look at it", "ask Codex to look at it"),
+        ("run pie test on the login module", "run pytest on the login module"),
+        ("install it with you vee", "install it with uv"),
+        ("the o auth flow is broken", "the OAuth flow is broken"),
+        ("the oauth flow is broken", "the OAuth flow is broken"),
+        ("write it to a jason file", "write it to a JSON file"),
+        ("keep the jason format", "keep the JSON format"),
+    ],
+)
+def test_tool_names_are_spelled_the_way_the_tools_spell_them(raw, expected):
+    assert apply_vocabulary(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A wrong correction costs more than a missed one, and every line here
+        # is a word that means something else far more often than it means a
+        # tool. None of them may be touched.
+        "the clause is confusing, rewrite it",
+        "move the cursor to the end of the line",
+        "jason said the build is green",
+        "the cloud bill went up again",
+        "close the file and open the next one",
+        "read the codebase before you change it",
+    ],
+)
+def test_a_word_that_is_not_a_tool_name_is_left_alone(raw):
+    assert apply_vocabulary(raw, ["Claude", "Codex", "Kokoro"]) == raw
+
+
+@pytest.mark.parametrize(
+    "raw, words, expected",
+    [
+        # Capitalization, from an exact match.
+        ("ask abhiyan about it", ["Abhiyan"], "ask Abhiyan about it"),
+        # One edit: a syllable the transcriber heard wrong.
+        ("ask abhiyen about it", ["Abhiyan"], "ask Abhiyan about it"),
+        # Two edits, allowed because the entry is eight characters or more.
+        ("the paraqueet model", ["Parakeet"], "the Parakeet model"),
+        # A pair of tokens: the transcriber split one name in two.
+        ("ask abhi yan about it", ["Abhiyan"], "ask Abhiyan about it"),
+        # Several entries, the nearest wins.
+        ("kokoru and parakeet", ["Kokoro", "Parakeet"], "Kokoro and Parakeet"),
+        # Punctuation and spacing around the token survive untouched.
+        ("(abhiyen), please", ["Abhiyan"], "(Abhiyan), please"),
+    ],
+)
+def test_vocabulary_words_are_spelled_the_users_way(raw, words, expected):
+    assert apply_vocabulary(raw, words) == expected
+
+
+@pytest.mark.parametrize(
+    "raw, words",
+    [
+        # Under five characters an entry only ever fixes capitalization,
+        # because every short word is one edit from half the language.
+        ("a bowl of soup", ["Bol"]),
+        ("the bot replied", ["Bol"]),
+        # Common English words are never rewritten into someone's name.
+        ("the code is done", ["Codex"]),
+        ("run the tests in the cloud", ["Claude"]),
+        ("that is the point", ["Poudel"]),
+        # Nothing close enough.
+        ("refactor the login module", ["Abhiyan", "Parakeet"]),
+    ],
+)
+def test_vocabulary_never_invents_a_correction(raw, words):
+    assert apply_vocabulary(raw, words) == raw
+
+
+def test_an_empty_vocabulary_still_spells_tool_names():
+    assert apply_vocabulary("open claude code", []) == "open Claude Code"
+    assert apply_vocabulary("open claude code", None) == "open Claude Code"
+
+
+@pytest.mark.asyncio
+async def test_clean_transcript_applies_the_vocabulary_before_the_model():
+    cleaner = FakeCleaner()
+    out = await clean_transcript(
+        FakeEngine(error=True),
+        "um open cloud code and ask abhiyen",
+        2.0,
+        use_llm=False,
+        cleaner=cleaner,
+        vocabulary=["Abhiyan"],
+    )
+    # The model is handed already-spelled text, so it has nothing to undo.
+    assert cleaner.calls == ["Open Claude Code and ask Abhiyan"]
+    assert out == "Open Claude Code and ask Abhiyan [tuned]"
+
+
+@pytest.mark.asyncio
+async def test_vocabulary_applies_with_no_model_at_all():
+    out = await clean_transcript(
+        FakeEngine(error=True),
+        "um push it to git hub please",
+        2.0,
+        use_llm=False,
+        vocabulary=[],
+    )
+    assert out == "Push it to GitHub please"

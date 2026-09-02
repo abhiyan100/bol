@@ -931,3 +931,123 @@ def test_an_empty_partial_leaves_listening_alone():
     live.emit("", "")
 
     assert hud.calls == []
+
+
+# ------------------------------------------------------- A4 startup and the mic
+
+
+class SilentTranscriber(FakeTranscriber):
+    def __init__(self, boom=None):
+        super().__init__([])
+        self.boom = boom
+        self.warmups = 0
+
+    async def warmup(self):
+        self.warmups += 1
+        if self.boom is not None:
+            raise self.boom
+
+
+@pytest.mark.asyncio
+async def test_the_pill_says_what_the_startup_wait_is_for():
+    # Cold, loading the speech model is the longest silence in a Bol
+    # startup. An unexplained one is exactly what the pill exists to end.
+    d = _daemon(0, [])
+    d.transcriber = SilentTranscriber()
+
+    await d._warm_speech_model()
+
+    assert d.hud.calls == [("thinking", "Loading speech model", ""), ("idle", "", "")]
+    assert d.transcriber.warmups == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_warmup_does_not_leave_the_pill_loading_forever():
+    d = _daemon(0, [])
+    d.transcriber = SilentTranscriber(boom=RuntimeError("weights are missing"))
+
+    with pytest.raises(RuntimeError):
+        await d._warm_speech_model()
+
+    assert d.hud.states == ["thinking", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_text_mode_has_no_speech_model_to_wait_for():
+    d = _daemon(0, [])
+    d.transcriber = None
+
+    await d._warm_speech_model()
+
+    assert d.hud.calls == []
+
+
+class MissingMicRecorder(FakeRecorder):
+    """A recorder whose configured device is not there any more."""
+
+    def __init__(self, failures=1, label="AirPods Pro"):
+        super().__init__(0)
+        self.failures = failures
+        self.device_label = label
+        self.opens = 0
+        self.defaulted = False
+
+    async def open(self):
+        self.opens += 1
+        if self.opens <= self.failures:
+            raise OSError("PortAudioError: device unavailable")
+
+    def use_default_device(self):
+        self.defaulted = True
+
+
+@pytest.mark.asyncio
+async def test_a_missing_mic_is_named_and_the_default_is_tried_once():
+    d = _daemon(0, [])
+    d.cfg.audio.input_device = "AirPods"
+    d.recorder = MissingMicRecorder(failures=1)
+
+    await d._open_microphone()
+
+    assert d.hud.calls == [("error", "Mic lost: AirPods Pro", "")]
+    assert d.recorder.defaulted is True
+    assert d.recorder.opens == 2  # the named device, then the default one
+
+
+@pytest.mark.asyncio
+async def test_the_default_device_is_not_retried_against_itself():
+    # Nothing was configured, so the open that just failed WAS the default.
+    d = _daemon(0, [])
+    d.cfg.audio.input_device = ""
+    d.recorder = MissingMicRecorder(failures=1, label="the default input")
+
+    await d._open_microphone()
+
+    assert d.hud.calls == [("error", "Mic lost: the default input", "")]
+    assert d.recorder.defaulted is False
+    assert d.recorder.opens == 1
+
+
+@pytest.mark.asyncio
+async def test_no_microphone_at_all_still_arms_the_hotkey():
+    # Both devices are gone. Bol says so and keeps going: the hotkey, the
+    # hook server, and text still work, and the mic may come back.
+    d = _daemon(0, [])
+    d.cfg.audio.input_device = "AirPods"
+    d.recorder = MissingMicRecorder(failures=2)
+
+    await d._open_microphone()
+
+    assert d.recorder.opens == 2
+    assert d.hud.states == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_microphone_that_opens_says_nothing():
+    d = _daemon(0, [])
+    d.recorder = MissingMicRecorder(failures=0)
+
+    await d._open_microphone()
+
+    assert d.recorder.opens == 1
+    assert d.hud.calls == []

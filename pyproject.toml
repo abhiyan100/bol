@@ -23,6 +23,12 @@ dependencies = [
     "sounddevice>=0.4.6",
     "pynput>=1.7.6",
     "tomli-w>=1.0",
+    # Silero v6 voice activity detection: a 2.4 MB abi3 wheel with no
+    # dependencies of its own (it bundles onnxruntime-free inference), so it
+    # is a base dependency rather than an extra. Endpointing is what decides
+    # whether a hands-free turn ends when you stop talking, and an energy
+    # gate cannot tell a keyboard from a syllable.
+    "pysilero-vad>=3.4; platform_machine == 'arm64'",
 ]
 
 [project.optional-dependencies]

@@ -1,7 +1,9 @@
 """CLI surface: exit codes, the doctor report, and clean startup errors."""
 
 import errno
+import json
 import os
+import subprocess
 import sys
 import types
 
@@ -177,3 +179,141 @@ def test_quiet_model_libraries_respects_an_explicit_choice(monkeypatch):
     monkeypatch.setattr(cli, "installed_models", lambda cfg: [("summaries", "x/y")])
     cli._quiet_model_libraries(Config())
     assert os.environ["HF_HUB_OFFLINE"] == "0"
+
+
+# ------------------------------------------------------------------ bluetooth
+
+
+class FakeStream:
+    """sd.InputStream, as far as probe_microphone is concerned."""
+
+    device = 3
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self, _frames):
+        return None
+
+
+def _fake_sounddevice(monkeypatch, name):
+    module = types.ModuleType("sounddevice")
+    module.InputStream = lambda **_kw: FakeStream()
+    module.query_devices = lambda _device, _kind: {"name": name}
+    monkeypatch.setitem(sys.modules, "sounddevice", module)
+
+
+@pytest.fixture
+def mic_probe(monkeypatch):
+    """probe_microphone with the permission and device questions answered."""
+
+    def arrange(name, bluetooth_json=None):
+        _fake_sounddevice(monkeypatch, name)
+        monkeypatch.setattr(cli, "_mic_authorization", lambda: cli._MIC_AUTHORIZED)
+        monkeypatch.setattr(cli, "_input_device", lambda _cfg: None)
+        monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(
+            cli.subprocess,
+            "run",
+            lambda *a, **k: types.SimpleNamespace(
+                returncode=0, stdout=bluetooth_json or "{}", stderr=""
+            ),
+        )
+        return cli.probe_microphone(Config())
+
+    return arrange
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Abhiyan's AirPods Pro",
+        "Beats Studio Buds",
+        "Bluetooth Headset",
+        "Sony WH-1000XM5",
+        "BT Mic",
+    ],
+)
+def test_a_bluetooth_mic_gets_a_row_of_its_own(mic_probe, name):
+    rows = mic_probe(name)
+    assert rows[0][0] == cli.OK
+    assert name in rows[0][1]
+    assert rows[1] == (cli.INFO, cli.BLUETOOTH_MIC_NOTE, "")
+    assert "200 to 500 ms" in rows[1][1]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "MacBook Pro Microphone",
+        "Shure MV7",          # wired, and "MV7" must not read as a headset
+        "Scarlett Solo USB",
+    ],
+)
+def test_a_wired_mic_gets_no_extra_row(mic_probe, name):
+    rows = mic_probe(name)
+    assert len(rows) == 1
+    assert rows[0] == (cli.OK, f"microphone: {name}", "")
+
+
+def test_a_renamed_headset_is_caught_by_system_profiler(mic_probe):
+    # People rename their headsets. The name says nothing, so the only
+    # trustworthy answer is the list of connected Bluetooth devices.
+    listing = json.dumps(
+        {
+            "SPBluetoothDataType": [
+                {
+                    "device_connected": [{"Kitchen Speaker": {"device_minorType": "Headset"}}],
+                    "device_not_connected": [{"Old Mic": {}}],
+                }
+            ]
+        }
+    )
+    rows = mic_probe("Kitchen Speaker", bluetooth_json=listing)
+    assert rows[1][1] == cli.BLUETOOTH_MIC_NOTE
+
+
+def test_a_disconnected_bluetooth_device_is_not_the_mic(mic_probe):
+    listing = json.dumps(
+        {"SPBluetoothDataType": [{"device_not_connected": [{"Old Mic": {}}]}]}
+    )
+    rows = mic_probe("Old Mic", bluetooth_json=listing)
+    assert len(rows) == 1
+
+
+def test_system_profiler_failing_is_not_a_doctor_failure(monkeypatch):
+    # doctor may be less informative. It may not be slower than the person
+    # reading it, and it may not fall over.
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+
+    def boom(*_a, **_k):
+        raise subprocess.TimeoutExpired("system_profiler", 2.0)
+
+    monkeypatch.setattr(cli.subprocess, "run", boom)
+    assert cli.bluetooth_device_names() == []
+    assert cli.is_bluetooth_mic("Kitchen Speaker") is False
+
+
+def test_the_bluetooth_probe_is_bounded(monkeypatch):
+    seen = {}
+
+    def record(*args, **kwargs):
+        seen.update(kwargs)
+        seen["argv"] = args[0]
+        return types.SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.subprocess, "run", record)
+    cli.bluetooth_device_names()
+    assert seen["argv"] == ["system_profiler", "SPBluetoothDataType", "-json"]
+    assert seen["timeout"] <= 2.0
+
+
+def test_a_denied_microphone_still_reports_one_row(monkeypatch):
+    monkeypatch.setattr(cli, "_mic_authorization", lambda: cli._MIC_DENIED)
+    rows = cli.probe_microphone(Config())
+    assert len(rows) == 1
+    assert rows[0][0] == cli.BAD

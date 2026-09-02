@@ -242,19 +242,22 @@ def _bol_on_port(host: str, port: int) -> bool:
 
 def probe_permissions(cfg) -> list[tuple[str, str, str]]:
     return [
-        probe_microphone(cfg),
+        *probe_microphone(cfg),
         probe_input_monitoring(),
         probe_automation(),
         probe_say_voice(cfg),
     ]
 
 
-def probe_microphone(cfg) -> tuple[str, str, str]:
+def probe_microphone(cfg) -> list[tuple[str, str, str]]:
     """Ask macOS for the real TCC answer, then open the device for 100 ms.
 
     A denied mic opens fine and returns silence, so the permission status is
     the only trustworthy signal; the stream open proves the device exists and
     raises the system prompt the first time.
+
+    Returns the microphone row, plus a second informational row when the
+    device Bol would record from is a Bluetooth headset.
     """
     hint = (
         "System Settings > Privacy & Security > Microphone > enable your "
@@ -262,15 +265,17 @@ def probe_microphone(cfg) -> tuple[str, str, str]:
     )
     status = _mic_authorization()
     if status in (_MIC_DENIED, _MIC_RESTRICTED):
-        return (BAD, "microphone: permission denied for this terminal app", hint)
+        return [(BAD, "microphone: permission denied for this terminal app", hint)]
     try:
         import sounddevice as sd
     except Exception as exc:
-        return (BAD, f"microphone: sounddevice unavailable ({exc})", install_hint("stt,llm"))
+        return [
+            (BAD, f"microphone: sounddevice unavailable ({exc})", install_hint("stt,llm"))
+        ]
     try:
         device = _input_device(cfg)
     except ValueError as exc:
-        return (BAD, f"microphone: {exc}", "set [audio] input_device")
+        return [(BAD, f"microphone: {exc}", "set [audio] input_device")]
     try:
         with sd.InputStream(
             samplerate=cfg.audio.sample_rate,
@@ -281,15 +286,103 @@ def probe_microphone(cfg) -> tuple[str, str, str]:
             name = sd.query_devices(stream.device, "input")["name"]
             stream.read(int(cfg.audio.sample_rate * 0.1))
     except Exception as exc:
-        return (BAD, f"microphone: cannot record ({exc})", hint)
+        return [(BAD, f"microphone: cannot record ({exc})", hint)]
     if status == _MIC_NOT_DETERMINED and _mic_authorization() == _MIC_NOT_DETERMINED:
-        return (
+        row = (
             INFO,
             f"microphone: {name} (macOS is still asking for permission; "
             "approve it, then rerun `bol doctor`)",
             "",
         )
-    return (OK, f"microphone: {name}", "")
+    else:
+        row = (OK, f"microphone: {name}", "")
+    rows = [row]
+    if is_bluetooth_mic(name):
+        rows.append((INFO, BLUETOOTH_MIC_NOTE, ""))
+    return rows
+
+
+BLUETOOTH_MIC_NOTE = (
+    "Bluetooth mic: expect 200 to 500 ms extra latency and lower quality "
+    "while recording; a wired or built-in mic is better for dictation."
+)
+
+# Names that give a Bluetooth headset away without asking the system. macOS
+# renames these devices to whatever the owner called them, so this is a hint
+# and the system_profiler answer below is the check.
+_BLUETOOTH_NAMES = ("airpods", "beats", "bluetooth", "buds", "wh-", "wf-")
+_BLUETOOTH_TOKEN = re.compile(r"\bbt\b")
+
+
+def is_bluetooth_mic(name: str) -> bool:
+    """Is the device Bol would record from a Bluetooth one?
+
+    Recording over Bluetooth drops the link into a headset profile: the input
+    is narrowband and every block arrives late. Worth one line in doctor, and
+    never worth failing over, so every failure here reads as "no".
+    """
+    if not name:
+        return False
+    lowered = name.lower()
+    if any(hint in lowered for hint in _BLUETOOTH_NAMES):
+        return True
+    if _BLUETOOTH_TOKEN.search(lowered):
+        return True
+    return any(
+        _same_device(name, connected) for connected in bluetooth_device_names()
+    )
+
+
+def _same_device(name: str, connected: str) -> bool:
+    left, right = name.lower().strip(), connected.lower().strip()
+    return bool(left and right and (left in right or right in left))
+
+
+def bluetooth_device_names() -> list[str]:
+    """Currently connected Bluetooth devices, per system_profiler.
+
+    Bounded and swallowed: doctor is allowed to be less informative, never
+    slower than the person reading it or louder than the thing it reports on.
+    """
+    if platform.system() != "Darwin":
+        return []
+    try:
+        proc = subprocess.run(
+            ["system_profiler", "SPBluetoothDataType", "-json"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        if proc.returncode != 0:
+            return []
+        return _connected_names(json.loads(proc.stdout or "{}"))
+    except Exception:
+        return []
+
+
+def _connected_names(data: object) -> list[str]:
+    """Walk system_profiler's JSON for the names under device_connected.
+
+    The shape has changed across macOS releases, so this looks for the key
+    rather than a fixed path, and ignores device_not_connected entirely.
+    """
+    names: list[str] = []
+    stack = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "device_not_connected":
+                    continue
+                if key == "device_connected" and isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            names.extend(str(k) for k in item)
+                    continue
+                stack.append(value)
+        elif isinstance(node, list):
+            stack.extend(node)
+    return names
 
 
 # AVAuthorizationStatus

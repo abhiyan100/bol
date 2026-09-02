@@ -1,14 +1,14 @@
 """Microphone capture with two stop conditions:
 
 - push-to-talk: caller stops the recording explicitly (hotkey released);
-- until-silence: an energy gate ends the utterance after trailing silence.
+- until-silence: a speech gate ends the utterance after trailing silence.
 
 Stop signalling uses per-recording session tokens, not shared state: begin()
 mints a token synchronously at the triggering event, and request_stop() on a
 token only ever ends *that* recording. A release for a session that never got
 the mic, or that already finished, is inert by construction: no cross-talk,
 no lost-stop races. The token also carries the mutable until_silence flag, so
-a tap can switch a running push-to-talk recording over to the energy gate.
+a tap can switch a running push-to-talk recording over to the speech gate.
 
 The stream is prepared once and kept. Building an sd.InputStream costs about
 33 ms on an M-series Mac and start() another 10 to 25 ms, and both used to sit
@@ -18,16 +18,19 @@ prepends pre_roll_ms of that ring so the opening word survives the press. The
 stream is released warm_s after the last recording rather than held forever:
 a Bluetooth headset pinned open stays in its tinny headset profile.
 
-The energy gate runs only while session.until_silence is set. Holding the key
-is already an explicit request to record, so push-to-talk hands back whatever
-it captured and lets the transcriber decide whether there were words in it.
-Gating there dropped the utterance of anyone who starts talking the instant
-the key goes down, because their own voice defined the noise floor. Levels are
-measured for every block regardless, so the gate is ready the moment the flag
-flips mid-recording.
+The speech gate ends a recording only while session.until_silence is set.
+Holding the key is already an explicit request to record, so push-to-talk
+hands back whatever it captured and lets the transcriber decide whether there
+were words in it. Gating there dropped the utterance of anyone who starts
+talking the instant the key goes down, because their own voice defined the
+noise floor. Every block is still put to the gate regardless, so the gate is
+warm the moment the flag flips mid-recording.
 
-Energy VAD is deliberately simple (RMS vs. an adaptive noise floor). It's a
-protocol seam: swap in Silero later without touching the daemon.
+Which gate runs is [audio] vad: Silero v6 by default, the old RMS rule as
+"energy". Both answer with a probability, and the hysteresis lives here:
+speech starts above START_PROB for START_BLOCKS in a row and ends after
+silence_ms below END_PROB. The block size is Silero's window, 512 samples at
+16 kHz, so nothing between the microphone and the decision re-buffers.
 
 A recording can also carry a tap: set session.tap before record() and every
 block of that recording, pre-roll included, is handed to it as it arrives. The
@@ -47,16 +50,10 @@ import numpy as np
 import sounddevice as sd
 
 from ..config import AudioConfig
+from .vad import BLOCK_MS, END_PROB, START_BLOCKS, START_PROB, build_gate
 
 log = logging.getLogger("bol.audio")
 
-_BLOCK_MS = 30
-# Once speech has started, a block only counts as silence below this fraction
-# of the start threshold. Hysteresis, so mid-word dips don't end the utterance.
-_RELEASE_RATIO = 0.6
-# The noise floor is the quiet fifth of what has been heard so far, not the
-# first few blocks: a user who speaks immediately can't raise their own floor.
-_FLOOR_PERCENTILE = 20
 # How much recent audio the always-on ring keeps. Caps pre_roll_ms and keeps
 # the buffer's memory flat no matter how long the stream stays warm.
 _RING_MS = 2000
@@ -132,7 +129,7 @@ class RecordingSession:
 
 
 class Recorder:
-    def __init__(self, cfg: AudioConfig) -> None:
+    def __init__(self, cfg: AudioConfig, gate=None) -> None:
         self._cfg = cfg
         self._device: int | None = None
         self._device_resolved = False
@@ -143,9 +140,13 @@ class Recorder:
         self._sink: asyncio.Queue[np.ndarray] | None = None
         # The live listener for the recording in flight, if it asked for one.
         self._tap = None
-        self._ring: deque[np.ndarray] = deque(maxlen=max(1, _RING_MS // _BLOCK_MS))
+        self._ring: deque[np.ndarray] = deque(maxlen=max(1, _RING_MS // BLOCK_MS))
         self._warm_task: asyncio.Task | None = None
         self._logged_latency = False
+        # Built on first use from [audio] vad (loading Silero costs a few ms),
+        # then reused and reset per recording. Injectable so endpointing can
+        # be tested against scripted probabilities instead of scripted audio.
+        self._gate = gate
 
     def begin(self, until_silence: bool = False) -> RecordingSession:
         return RecordingSession(until_silence)
@@ -157,6 +158,27 @@ class Recorder:
             self._device = _resolve_input_device(self._cfg.input_device)
             self._device_resolved = True
         return self._device
+
+    @property
+    def device_label(self) -> str:
+        """What to call the current input device in a message to the user."""
+        return self._cfg.input_device.strip() or "the default input"
+
+    def use_default_device(self) -> None:
+        """Forget [audio] input_device and take whatever macOS calls default.
+
+        The retry after a mic that vanished: the configured name may now match
+        nothing (the headset is off) while the built-in mic is right there.
+        """
+        self._device = None
+        self._device_resolved = True
+        self._discard()
+
+    def speech_gate(self):
+        """The gate for the until-silence path, built once per Recorder."""
+        if self._gate is None:
+            self._gate = build_gate(self._cfg)
+        return self._gate
 
     # ------------------------------------------------------------------ stream
 
@@ -187,7 +209,7 @@ class Recorder:
             samplerate=cfg.sample_rate,
             channels=cfg.channels,
             dtype="float32",
-            blocksize=int(cfg.sample_rate * _BLOCK_MS / 1000),
+            blocksize=int(cfg.sample_rate * BLOCK_MS / 1000),
             device=self._input_device(),
             callback=self._callback,
         )
@@ -202,6 +224,9 @@ class Recorder:
         self._loop = asyncio.get_running_loop()
         if self._stream is None:
             self._build()
+        # Same argument for the gate: loading Silero at the first press would
+        # put its model load between the key and the first syllable.
+        self.speech_gate()
 
     def _start_stream(self) -> None:
         if self._running:
@@ -270,7 +295,7 @@ class Recorder:
         self._discard()
 
     def _pre_roll(self) -> list[np.ndarray]:
-        count = int(self._cfg.pre_roll_ms) // _BLOCK_MS
+        count = int(self._cfg.pre_roll_ms) // BLOCK_MS
         if count <= 0 or not self._ring:
             return []
         return list(self._ring)[-count:]
@@ -341,18 +366,20 @@ class Recorder:
     ) -> np.ndarray | None:
         cfg = self._cfg
         loop = asyncio.get_running_loop()
+        gate = self.speech_gate()
+        gate.reset()
         blocks: list[np.ndarray] = list(pre_roll)
-        # Pre-roll feeds the noise floor but never the gate: it is room tone
-        # from before the press, and a door slam in it must not count as the
-        # start of speech.
-        levels: list[float] = [
-            float(np.sqrt(np.mean(block**2)) + 1e-9) for block in pre_roll
-        ]
+        # Pre-roll primes the gate but never votes: it is room tone from
+        # before the press, and a door slam in it must not count as the start
+        # of speech. The answers are thrown away on purpose.
+        for block in pre_roll:
+            gate.probability(block)
         speech_blocks = 0
         silence_blocks = 0
-        silence_limit = max(1, cfg.silence_ms // _BLOCK_MS)
-        max_blocks = cfg.max_utterance_s * 1000 // _BLOCK_MS
-        window_blocks = cfg.listen_window_s * 1000 // _BLOCK_MS
+        onset_blocks = 0
+        silence_limit = max(1, cfg.silence_ms // BLOCK_MS)
+        max_blocks = cfg.max_utterance_s * 1000 // BLOCK_MS
+        window_blocks = cfg.listen_window_s * 1000 // BLOCK_MS
         heard_speech = False
         # Wall clock as well as block count: a warm stream that goes silent
         # because the device vanished delivers nothing, and a block-only cap
@@ -367,25 +394,31 @@ class Recorder:
             except asyncio.TimeoutError:
                 continue
             blocks.append(chunk)
-            # Measured for every block, gate or no gate, so a tap that flips
-            # until_silence mid-recording finds a floor already built.
-            rms = float(np.sqrt(np.mean(chunk**2)) + 1e-9)
-            levels.append(rms)
-            floor = max(float(np.percentile(levels, _FLOOR_PERCENTILE)), 1e-4)
-            start = floor * cfg.energy_threshold
-            if rms > (start * _RELEASE_RATIO if heard_speech else start):
-                heard_speech = True
+            # Asked for every block, gate in use or not, so a tap that flips
+            # until_silence mid-recording finds a gate already warmed on this
+            # room and this voice.
+            prob = gate.probability(chunk)
+            if heard_speech:
+                # Continuing is easier than starting: one quiet block inside a
+                # word must not end the utterance.
+                if prob >= END_PROB:
+                    speech_blocks += 1
+                    silence_blocks = 0
+                else:
+                    silence_blocks += 1
+                    if session.until_silence and silence_blocks >= silence_limit:
+                        break
+            elif prob > START_PROB:
                 speech_blocks += 1
-                silence_blocks = 0
-            elif heard_speech:
-                silence_blocks += 1
-                if session.until_silence and silence_blocks >= silence_limit:
-                    break
-            elif session.until_silence and len(blocks) >= window_blocks:
-                break  # nobody spoke, give the mic up
+                onset_blocks += 1
+                heard_speech = onset_blocks >= START_BLOCKS
+            else:
+                onset_blocks = 0  # a lone loud block is a noise, not a word
+                if session.until_silence and len(blocks) >= window_blocks:
+                    break  # nobody spoke, give the mic up
 
         if not blocks:
             return None
-        if session.until_silence and speech_blocks * _BLOCK_MS < cfg.min_speech_ms:
+        if session.until_silence and speech_blocks * BLOCK_MS < cfg.min_speech_ms:
             return None
         return np.concatenate(blocks)

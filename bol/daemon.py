@@ -186,25 +186,21 @@ class Daemon:
             loop.create_task(warmup()).add_done_callback(_drain)
         print(f"bol: hook server on http://{self.cfg.server.host}:{self.cfg.server.port}/hook")
 
-        if self.transcriber is not None:
-            print("bol: warming up speech model ...")
-            await self.transcriber.warmup()
+        if self.transcriber is not None and not self.text_mode:
+            # Started before the warmup rather than after it. Loading the
+            # speech model is the longest silence in a Bol startup, and an
+            # unexplained wait is what the pill exists to end. Either way it
+            # is up before the key is armed, so the first press has a pill to
+            # appear on.
+            await self.hud.start()
+        await self._warm_speech_model()
 
         if self.text_mode or self.transcriber is None:
             print("bol: text mode. Type what you'd say ('send it', 'type ...', 'close').")
             await self._text_console()
             return
 
-        # Build the input stream before the key is armed: construction is the
-        # expensive half of opening a mic and it must not land on the press.
-        try:
-            await self.recorder.open()
-        except Exception as exc:
-            log.warning("could not prepare the microphone: %s", exc)
-
-        # Started before the key is armed so the very first press has a pill
-        # to appear on.
-        await self.hud.start()
+        await self._open_microphone()
 
         self.hotkey = HotkeyListener(
             self.cfg.hotkey, self._hotkey_pressed, self._hotkey_released
@@ -224,6 +220,50 @@ class Daemon:
             await self.recorder.close()
             await self.server.stop()
             await self.engine.stop()
+
+    async def _warm_speech_model(self) -> None:
+        """Load the speech model, with the pill saying so.
+
+        Cold, this is seconds of nothing: no window, no sound, and a hotkey
+        that answers late. The pill says what the wait is for and clears
+        itself however the load ends, so a failed warmup does not leave
+        "Loading speech model" on screen forever.
+        """
+        if self.transcriber is None:
+            return
+        print("bol: warming up speech model ...")
+        self.hud.set("thinking", "Loading speech model")
+        try:
+            await self.transcriber.warmup()
+        finally:
+            self.hud.set("idle")
+
+    async def _open_microphone(self) -> None:
+        """Build the input stream before the key is armed.
+
+        Construction is the expensive half of opening a mic and it must not
+        land on the press. When the configured device is gone (the headset is
+        off, another app took it) Bol says which one and tries the system
+        default once, because a built-in mic that works beats a named one
+        that does not.
+        """
+        try:
+            await self.recorder.open()
+            return
+        except Exception as exc:
+            name = self.recorder.device_label
+            log.warning("could not prepare the microphone (%s): %s", name, exc)
+            self.hud.set("error", f"Mic lost: {name}")
+        if not self.cfg.audio.input_device.strip():
+            return  # already the default device; there is nothing to fall back to
+        log.info("retrying with the system default input device")
+        self.recorder.use_default_device()
+        try:
+            await self.recorder.open()
+        except Exception as exc:
+            log.warning("the default input device did not open either: %s", exc)
+        else:
+            print("bol: using the system default microphone instead.")
 
     # ---------------------------------------------------------------- listening
 
@@ -510,6 +550,7 @@ class Daemon:
                 self.cfg.cleanup.deadline_s,
                 use_llm=self.cfg.llm.provider == "api",
                 cleaner=self.cleaner,
+                vocabulary=self.cfg.vocabulary.words,
             )
             if cleaned != text:
                 print(f"bol: cleaned -> {cleaned}")

@@ -147,6 +147,7 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and sys_platform == 'darwin'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and sys_platform == 'darwin'" },
     { name = "pynput", marker = "sys_platform == 'darwin'" },
+    { name = "pysilero-vad", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "sounddevice", marker = "sys_platform == 'darwin'" },
     { name = "tomli-w", marker = "sys_platform == 'darwin'" },
 ]
@@ -199,6 +200,7 @@ requires-dist = [
     { name = "parakeet-mlx", marker = "extra == 'stt'", specifier = ">=0.3" },
     { name = "phonemizer-fork", marker = "extra == 'kokoro'" },
     { name = "pynput", specifier = ">=1.7.6" },
+    { name = "pysilero-vad", marker = "platform_machine == 'arm64'", specifier = ">=3.4" },
     { name = "sounddevice", specifier = ">=0.4.6" },
     { name = "spacy", marker = "extra == 'kokoro'", specifier = ">=3.8,<3.9" },
     { name = "tomli-w", specifier = ">=1.0" },
@@ -1143,6 +1145,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pysilero-vad"
+version = "3.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/92/16da34eea1443015b00e847d534959f034a1150776d5421b57b43c5b43f9/pysilero_vad-3.4.0.tar.gz", hash = "sha256:0a4937065ab0f8e49aafe5e503f67656525a32c5401002ffe8098a87e00bb657", size = 2402347, upload-time = "2026-07-07T16:52:46.214Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/72/67/1a955474cbd62649985a0a4118cdd9e1b5cb7a9bfebfd069518c786b99e7/pysilero_vad-3.4.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:cb0ea55f2adb53958afbb41d3ea665a73be6091e20a8d368a3b8cc83c20bb2b4", size = 2391783, upload-time = "2026-07-07T16:52:31.839Z" },
 ]
 
 [[package]]

@@ -189,7 +189,10 @@ def test_live_words_are_on_with_a_context_that_actually_streams():
     # held-back text. 16 frames commits a word after 1.3 s, which is a pill
     # you can read while you talk.
     assert cfg.stt.stream_context == [256, 16]
-    assert cfg.stt.stream_chunk_ms == 320
+    # And a step long enough to be worth committing: parakeet-mlx spends the
+    # first encoder frame of every step on its window seam, so 320 ms would
+    # commit one frame in four from garbage. See bol/stt/parakeet.py.
+    assert cfg.stt.stream_chunk_ms == 640
 
 
 def test_load_config_applies_the_streaming_fields(tmp_path):
@@ -201,3 +204,57 @@ def test_load_config_applies_the_streaming_fields(tmp_path):
     assert cfg.stt.live is False
     assert cfg.stt.stream_context == [256, 8]
     assert cfg.stt.stream_chunk_ms == 160
+
+
+# ------------------------------------------------------- v0.3 phase 3 fields
+
+
+def test_silero_is_the_default_gate():
+    cfg = Config()
+    assert cfg.audio.vad == "silero"
+    data = tomllib.loads(DEFAULT_CONFIG_TOML)
+    assert data["audio"]["vad"] == cfg.audio.vad
+
+
+def test_validate_accepts_both_gates():
+    for mode in ("silero", "energy"):
+        cfg = Config()
+        cfg.audio.vad = mode
+        validate_config(cfg)
+
+
+def test_validate_rejects_an_unknown_gate():
+    cfg = Config()
+    cfg.audio.vad = "webrtc"
+
+    with pytest.raises(ValueError) as err:
+        validate_config(cfg)
+
+    message = str(err.value)
+    assert "webrtc" in message
+    assert "silero" in message and "energy" in message
+
+
+def test_the_vocabulary_starts_empty():
+    cfg = Config()
+    assert cfg.vocabulary.words == []
+    data = tomllib.loads(DEFAULT_CONFIG_TOML)
+    assert data["vocabulary"]["words"] == cfg.vocabulary.words
+
+
+def test_load_config_reads_the_vocabulary(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[audio]\nvad = "energy"\n[vocabulary]\nwords = ["Abhiyan", "Bol"]\n')
+
+    cfg = load_config(path)
+
+    assert cfg.audio.vad == "energy"
+    assert cfg.vocabulary.words == ["Abhiyan", "Bol"]
+
+
+def test_two_configs_do_not_share_a_vocabulary_list():
+    # A mutable default that leaks between Config() instances would put one
+    # user's words into another run's transcripts.
+    first, second = Config(), Config()
+    first.vocabulary.words.append("Abhiyan")
+    assert second.vocabulary.words == []

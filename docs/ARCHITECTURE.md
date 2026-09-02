@@ -122,9 +122,13 @@ release. In `submit = "auto"` a dictation of three or more words is pasted and
 sent in one motion, shorter text is pasted without Enter (Claude Code's own
 `/voice` rule), "type ..." never sends, and a trailing "send it" always does.
 Hands-free reopen after Bol speaks is opt-in: with auto-send, an unasked mic
-could turn room noise into a prompt. Hands-free listening keeps the energy
-gate, with the noise floor taken as the adaptive 20th percentile of block
-energy and hysteresis on release. The hotkey listener checks pynput's
+could turn room noise into a prompt. Hands-free and tap-ended listening
+endpoint with Silero VAD (pysilero-vad, a 2.4 MB wheel with no
+dependencies, about 1 ms per 32 ms block): speech starts after two blocks
+above 0.5, ends after `silence_ms` below 0.35. The old energy gate remains
+as the explicit and automatic fallback; it provably cannot hear speech that
+starts before it has measured any room tone, which is why it is no longer
+the default. The hotkey listener checks pynput's
 `IS_TRUSTED` after start and raises a clear Input Monitoring error instead
 of silently never firing.
 
@@ -180,7 +184,8 @@ STT provider protocol especially.
 | `bol/hooks/events.py` | Typed payload views + per-turn tool accumulation |
 | `bol/hooks/installer.py` | Idempotent settings.json hook install/uninstall |
 | `bol/grammar/commands.py` | Voice-command grammar over final transcripts |
-| `bol/audio/capture.py` | Mic capture; push-to-talk stop or energy-gate endpointing |
+| `bol/audio/capture.py` | One persistent mic stream, ring with pre-roll, per-recording sessions and taps |
+| `bol/audio/vad.py` | `SpeechGate` protocol: Silero (default) and the energy fallback |
 | `bol/stt/` | `Transcriber` protocol; parakeet-mlx implementation |
 | `bol/speak/` | `Speaker` protocol; `say` and Kokoro implementations |
 | `bol/summarize/` | `Summarizer` protocol; LLM persona + template floor |

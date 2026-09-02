@@ -1,7 +1,12 @@
-"""Capture tests: the energy gate must never eat a push-to-talk utterance,
+"""Capture tests: the speech gate must never eat a push-to-talk utterance,
 until-silence must still endpoint on its own, and the prepared mic must be
 built once, kept warm, and rebuilt when the device dies. No hardware: a fake
 InputStream pumps scripted blocks at the recorder's callback.
+
+These run on the energy gate, which turns scripted audio into a decision, so
+the whole path from the callback to the endpoint is exercised. The hysteresis
+itself is tested against scripted probabilities further down, and the gates
+themselves in test_vad.py.
 """
 
 import asyncio
@@ -16,7 +21,7 @@ from bol.audio import capture
 from bol.audio.capture import Recorder, _resolve_input_device
 from bol.config import AudioConfig
 
-BLOCK = 480  # 30ms @ 16kHz, the recorder's block size
+BLOCK = 512  # 32 ms @ 16 kHz: Silero's window, and the recorder's block
 _RNG = np.random.default_rng(7)
 
 _DEVICES = [
@@ -40,9 +45,12 @@ def _speech_int16(n):
 
 def _cfg(**over):
     cfg = AudioConfig()
-    cfg.silence_ms = 90       # 3 blocks of trailing silence ends an utterance
+    # Scripted noise is not speech to a real VAD, so these run the energy
+    # gate: it is the one that turns this audio into a decision.
+    cfg.vad = "energy"
+    cfg.silence_ms = 96       # 3 blocks of trailing silence ends an utterance
     cfg.min_speech_ms = 60    # 2 speech blocks clears the noise gate
-    cfg.listen_window_s = 1   # 33 blocks of nobody talking gives the mic up
+    cfg.listen_window_s = 1   # 31 blocks of nobody talking gives the mic up
     cfg.max_utterance_s = 2   # backstop so a broken test can't hang
     for key, value in over.items():
         setattr(cfg, key, value)
@@ -334,7 +342,7 @@ async def test_the_start_latency_is_measured_once(monkeypatch, caplog):
 
 
 async def test_pre_roll_from_a_warm_stream_is_prepended(monkeypatch):
-    recorder = Recorder(_cfg(pre_roll_ms=90))  # three blocks of pre-roll
+    recorder = Recorder(_cfg(pre_roll_ms=96))  # three blocks of pre-roll
     first = recorder.begin()
     opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
 
@@ -443,7 +451,7 @@ async def test_the_tap_sees_the_same_audio_as_the_recording(monkeypatch):
 async def test_the_tap_gets_the_pre_roll_before_the_live_blocks(monkeypatch):
     # The word that started before the key went down is exactly the word a
     # live view must not open by missing.
-    recorder = Recorder(_cfg(pre_roll_ms=90))
+    recorder = Recorder(_cfg(pre_roll_ms=96))
     first = recorder.begin()
     opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
 
@@ -499,3 +507,109 @@ async def test_the_tap_stops_when_its_recording_does(monkeypatch):
 
     assert during > 0
     assert after == 0
+
+
+# ------------------------------------------------------- endpointing decisions
+
+
+class ScriptedGate:
+    """A speech gate that reads its answers off a list.
+
+    Endpointing is a decision about probabilities, so it is tested with
+    probabilities. Scripted noise can only ever test the energy gate's idea
+    of what a probability is, which test_vad.py does separately.
+    """
+
+    def __init__(self, script=(), tail=0.0):
+        self.script = list(script)
+        self.tail = tail
+        self.seen = 0
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
+
+    def probability(self, _block):
+        self.seen += 1
+        return self.script.pop(0) if self.script else self.tail
+
+
+async def test_one_loud_block_does_not_open_an_utterance(monkeypatch):
+    # A door, a keyboard, a chair. Speech has to be confirmed by a second
+    # block before the recording is allowed to be about anything.
+    gate = ScriptedGate([0.1, 0.99, 0.1], tail=0.1)
+    recorder = Recorder(_cfg(), gate=gate)
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _silence(40))
+
+    assert await _record(recorder, session, until_silence=True) is None
+    assert gate.seen >= 31  # it gave the mic up at listen_window_s, not at max
+
+
+async def test_two_blocks_over_the_start_threshold_open_it(monkeypatch):
+    gate = ScriptedGate([0.1, 0.99, 0.99], tail=0.05)
+    recorder = Recorder(_cfg(), gate=gate)
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _silence(40))
+
+    audio = await _record(recorder, session, until_silence=True)
+
+    # Opened on blocks 2 and 3, then ended after three blocks under the
+    # release threshold: 6 blocks, not the whole listen window.
+    assert audio is not None
+    assert audio.size // BLOCK == 6
+
+
+async def test_a_dip_inside_a_word_does_not_end_the_utterance(monkeypatch):
+    # The hysteresis: 0.4 is under the threshold that STARTS speech and over
+    # the one that ends it, so a quiet syllable keeps the recording open.
+    gate = ScriptedGate([0.9, 0.9, 0.4, 0.4, 0.4, 0.9, 0.2, 0.2, 0.2], tail=0.2)
+    recorder = Recorder(_cfg(), gate=gate)
+    session = recorder.begin()
+    _fake_sd(monkeypatch, _silence(40))
+
+    audio = await _record(recorder, session, until_silence=True)
+
+    assert audio is not None
+    assert audio.size // BLOCK == 9  # six of speech plus the three that ended it
+
+
+async def test_the_gate_is_reset_for_every_recording(monkeypatch):
+    # Silero is recurrent and the energy gate carries a noise floor. Either
+    # one, left unreset, would judge this utterance by the last one.
+    gate = ScriptedGate(tail=0.9)
+    recorder = Recorder(_cfg(), gate=gate)
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    await _record(recorder, first, until_silence=False, close=False)
+    second = recorder.begin()
+    opened[0].feed(_speech(4), on_exhausted=second.request_stop)
+    await _record(recorder, second, until_silence=False)
+
+    assert gate.resets == 2
+
+
+async def test_the_pre_roll_primes_the_gate_without_voting(monkeypatch):
+    # The ring holds audio from before the press. It has to reach the gate,
+    # or a Silero that has heard nothing judges the first syllable cold. It
+    # must not be allowed to START the utterance: a door slam three hundred
+    # milliseconds before the key went down is not the user talking.
+    gate = ScriptedGate(tail=0.9)
+    recorder = Recorder(_cfg(pre_roll_ms=96, warm_s=1.0), gate=gate)
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    await _record(recorder, first, until_silence=False, close=False)
+    opened[0].feed(_silence(6))
+    await asyncio.sleep(0.05)
+
+    # Three blocks of pre-roll that all scream speech, then a room that says
+    # nothing at all for the rest of the recording.
+    gate.script = [0.99, 0.99, 0.99]
+    gate.tail = 0.05
+    second = recorder.begin()
+    opened[0].feed(_silence(40))
+
+    assert await _record(recorder, second, until_silence=True) is None
+    assert gate.script == []  # the pre-roll was fed, and then ignored
