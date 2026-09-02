@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bol. Talk to Claude Code.</title>
-<meta name="description" content="Open-source voice loop for Claude Code on macOS. Tap a key, say what you want. Bol types it, sends it, and tells you out loud what Claude did.">
+<meta name="description" content="Open-source voice for Claude Code on macOS. Say type and talk. Say send it. Bol listens from the moment it starts, types where your cursor is, and can tell you out loud what Claude did. Local, free, MIT.">
 <meta property="og:title" content="Bol. Talk to Claude Code.">
-<meta property="og:description" content="Tap a key. Say what you want. Bol types it, sends it, and tells you out loud what Claude did. Local, free, MIT.">
+<meta property="og:description" content="Say type and talk. Say send it. Bol types where your cursor is and can tell you out loud what Claude did. Local, free, MIT.">
 <meta property="og:image" content="https://bol-voice.vercel.app/og.png">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
@@ -216,8 +216,8 @@
 </nav>
 
 <header class="wrap">
-  <h1>Talk to Claude Code.<br><span class="accent">It talks back.</span></h1>
-  <p class="sub">Tap a key. Say what you want. Bol types it, sends it, and tells you out loud what Claude did.</p>
+  <h1>Talk to Claude Code.<br><span class="accent">Hands-free. On your Mac.</span></h1>
+  <p class="sub">Say &ldquo;type&rdquo; and talk. Say &ldquo;send it&rdquo;. Bol listens from the moment it starts, types where your cursor is, and with talk-back on tells you out loud what Claude did.</p>
   <div class="cta-row">
     <button class="install" id="install" aria-label="Copy install command">
       <span class="dollar">$</span>
@@ -236,29 +236,29 @@
 <section class="wrap reveal">
   <h2>The loop</h2>
   <div class="steps">
-    <div class="step"><b>Tap <span class="k">right &#8997;</span></b><span>Tap to talk, hold for push-to-talk. Works in any terminal window.</span></div>
-    <div class="step"><b>Speak</b><span>Local speech to text. Nothing leaves your Mac.</span></div>
-    <div class="step"><b>Tap again</b><span>Bol pastes into the Claude Code session you are looking at and sends it. Just stop talking and it pastes and waits.</span></div>
-    <div class="step"><b>Hear back</b><span>When Claude finishes, Bol speaks a summary and flags failures.</span></div>
+    <div class="step"><b>Say &ldquo;type&rdquo;</b><span>Or hold <span class="k">right &#8997;</span> in a noisy room. A 5 MB keyword model listens on your Mac; nothing is recorded.</span></div>
+    <div class="step"><b>Speak</b><span>Local speech to text, live in the pill. Pause and it lands where your cursor is: Claude Code, Notes, Slack.</span></div>
+    <div class="step"><b>Say &ldquo;send it&rdquo;</b><span>Enter. Never pressed on its own.</span></div>
+    <div class="step"><b>Hear back</b><span>With <code>--talk-back</code>, Bol speaks a summary when Claude finishes and reads permission prompts to you.</span></div>
   </div>
 </section>
 
 <section class="wrap reveal">
   <h2>Voice commands</h2>
   <div class="cmds">
-    <div class="row2"><span class="say">"... send it"</span><span class="does">submits the prompt</span></div>
-    <div class="row2"><span class="say">"type git status"</span><span class="does">inserts text, no Enter</span></div>
-    <div class="row2"><span class="say">"scratch that"</span><span class="does">clears the input</span></div>
-    <div class="row2"><span class="say">"stop claude"</span><span class="does">interrupts the running turn</span></div>
+    <div class="row2"><span class="say">"type ..."</span><span class="does">starts dictation, pasted after a pause</span></div>
+    <div class="row2"><span class="say">"send it"</span><span class="does">presses Enter</span></div>
+    <div class="row2"><span class="say">"scratch that"</span><span class="does">clears what Bol pasted</span></div>
+    <div class="row2"><span class="say">"hey Bol ..."</span><span class="does">talk-back conversation with Claude</span></div>
     <div class="row2"><span class="say">"go ahead"</span><span class="does">approves a permission prompt</span></div>
-    <div class="row2"><span class="say">"stop listening"</span><span class="does">sleeps until the next hotkey</span></div>
+    <div class="row2"><span class="say">"stop listening"</span><span class="does">pauses the ear until the next key press</span></div>
   </div>
 </section>
 
 <section class="wrap reveal">
   <h2>Built to stay yours</h2>
   <div class="facts">
-    <div class="fact"><b>100% local</b><span>Speech recognition, a 1B summarizer, and the voice all run on your Mac. Nothing leaves it.</span></div>
+    <div class="fact"><b>100% local</b><span>Keyword spotting, speech recognition, cleanup, and the optional summarizer and voice all run on your Mac. Nothing leaves it.</span></div>
     <div class="fact"><b>$0</b><span>No API keys required. No subscription. Ever.</span></div>
     <div class="fact"><b>MIT</b><span>Fork it, ship it, make it yours.</span></div>
   </div>
