@@ -50,7 +50,7 @@ agent did is still on you. Bol closes that loop.
 | Works with API keys and Bedrock | yes | no, Claude.ai login only | yes |
 | Open source | MIT | no | mostly no |
 
-Dictation apps: Superwhisper, Wispr Flow, Infina, FluidVoice and friends.
+Dictation apps: Superwhisper, Wispr Flow, FluidVoice and friends.
 Good tools; they stop at the input box.
 
 ## How it works

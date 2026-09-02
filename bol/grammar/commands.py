@@ -1,8 +1,8 @@
 """Trailing/leading voice-command grammar.
 
 Commands ride on the final transcript itself, no second model, no intent
-classifier. A short fuzzy match against the last few words decides what to do,
-mirroring the infina.so UX ("say 'send'", "say 'type ...'"):
+classifier. A short fuzzy match against the last few words decides what to do
+("say 'send it'", "say 'type ...'"):
 
   "refactor the auth module send it"  -> SEND  text="refactor the auth module"
   "type hello world"                  -> TYPE  text="hello world"   (no Enter)
