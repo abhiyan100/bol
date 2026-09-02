@@ -12,17 +12,21 @@ def _settings(tmp_path):
     return json.loads((tmp_path / ".claude" / "settings.json").read_text())
 
 
+def _bol_urls(settings, event):
+    return [
+        installer._hook_url(h)
+        for entry in settings["hooks"][event]
+        for h in entry["hooks"]
+        if installer._hook_url(h)
+    ]
+
+
 def test_install_uninstall_roundtrip(tmp_path):
     path = installer.install(URL, scope="project", project_dir=tmp_path)
     assert path == tmp_path / ".claude" / "settings.json"
     settings = json.loads(path.read_text())
     for event in installer.EVENTS:
-        urls = [
-            h["url"]
-            for entry in settings["hooks"][event]
-            for h in entry["hooks"]
-        ]
-        assert URL in urls
+        assert URL in _bol_urls(settings, event)
     assert installer.installed(URL, scope="project", project_dir=tmp_path)
 
     installer.uninstall(URL, scope="project", project_dir=tmp_path)
@@ -119,8 +123,45 @@ def test_install_replaces_an_old_token_entry(tmp_path):
     installer.install(f"{URL}?token=new", scope="project", project_dir=tmp_path)
 
     settings = _settings(tmp_path)
-    urls = [h["url"] for entry in settings["hooks"]["Stop"] for h in entry["hooks"]]
-    assert urls == [f"{URL}?token=new"]
+    assert _bol_urls(settings, "Stop") == [f"{URL}?token=new"]
+
+
+def test_hook_is_an_async_command_that_never_fails(tmp_path):
+    installer.install(f"{URL}?token=abc", scope="project", project_dir=tmp_path)
+    settings = _settings(tmp_path)
+    (hook,) = settings["hooks"]["Stop"][0]["hooks"]
+    # An http hook makes Claude Code print a connection error every time Bol
+    # is not running; an async command with `|| true` is silent and never
+    # blocks Claude.
+    assert hook["type"] == "command"
+    assert hook["async"] is True
+    assert hook["command"].endswith("|| true")
+    assert f"'{URL}?token=abc'" in hook["command"]
+    assert "--data-binary @-" in hook["command"]
+    assert "-m 3" in hook["command"]
+    assert settings["hooks"]["PostToolUse"][0]["matcher"] == "*"
+
+
+def test_old_http_entries_are_replaced_and_removed(tmp_path):
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    old = {
+        "hooks": {
+            event: [{"hooks": [{"type": "http", "url": f"{URL}?token=old"}]}]
+            for event in installer.EVENTS
+        }
+    }
+    (claude_dir / "settings.json").write_text(json.dumps(old))
+    assert not installer.installed(f"{URL}?token=old", scope="project", project_dir=tmp_path)
+
+    installer.install(f"{URL}?token=new", scope="project", project_dir=tmp_path)
+    settings = _settings(tmp_path)
+    assert "old" not in json.dumps(settings)
+    assert '"http"' not in json.dumps(settings)
+    assert installer.installed(f"{URL}?token=new", scope="project", project_dir=tmp_path)
+
+    installer.uninstall(f"{URL}?token=whatever", scope="project", project_dir=tmp_path)
+    assert _settings(tmp_path).get("hooks", {}) == {}
 
 
 def test_backup_is_taken_once(tmp_path):

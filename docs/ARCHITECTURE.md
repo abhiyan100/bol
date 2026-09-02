@@ -48,12 +48,17 @@ after a short delay (the TUI otherwise swallows it as part of the paste).
 version string (`2.1.252`), so pane discovery confirms via `ps -t <pane_tty>`
 looking for a `claude` process on the pane's TTY.
 
-**HTTP hooks, not command hooks.** `{"type": "http", "url": …}` posts every
-event to the loopback daemon with no per-event shell spawn. The `Stop` payload
-carries `last_assistant_message` directly: no transcript JSONL parsing on the
-hot path. `PostToolUse` events are accumulated per `prompt_id` and flushed
-into the `StopEvent`, which is how the summarizer knows what Claude *did*
-rather than just what it *said*. The hook server always answers `{}`
+**Async command hooks that post to loopback.** Each hook is
+`curl ... --data-binary @- 'http://127.0.0.1:8770/hook?token=...' || true`
+with `"async": true`. Bol first shipped `http` hooks (no per-event process),
+but Claude Code prints a hook error into the transcript every time an http
+hook cannot connect, and Bol is a daemon people start and stop; every
+session nagged whenever Bol was off. The async command costs one short-lived
+curl per event, never blocks Claude, and is silent when nothing listens. The
+`Stop` payload carries `last_assistant_message` directly: no transcript JSONL
+parsing on the hot path. `PostToolUse` events are accumulated per `prompt_id`
+and flushed into the `StopEvent`, which is how the summarizer knows what
+Claude *did* rather than just what it *said*. The hook server answers `{}`
 immediately and processes in the background: Bol observes, never blocks.
 
 **Command words are grammar, not a model.** "send it", "type …", "close" are

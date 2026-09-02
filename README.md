@@ -192,9 +192,11 @@ In `api` mode your own model does the polish instead.
 - The hook server binds `127.0.0.1` only, and every request carries a random
   128-bit token stored in `~/.config/bol/hook_token` (mode 0600). Non-loopback
   hosts are refused unless you opt in.
-- `bol setup` adds three `http` hooks (Stop, PostToolUse, Notification) to
-  `~/.claude/settings.json`, shows you the entry first, writes atomically, and
-  keeps a one-time backup next to it. `bol hook uninstall` removes them.
+- `bol setup` adds three hooks (Stop, PostToolUse, Notification) to
+  `~/.claude/settings.json`: each one a background `curl` to loopback that
+  never fails, so Claude Code never waits on Bol and stays quiet when Bol is
+  not running. Setup shows you the entry first, writes atomically, and keeps
+  a one-time backup next to it. `bol hook uninstall` removes them.
 - Injection only targets terminal apps, re-checks the front app right before
   pasting, and restores your clipboard afterwards.
 - In the default configuration nothing leaves your Mac. `provider = "api"`

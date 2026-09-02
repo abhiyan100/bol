@@ -772,12 +772,13 @@ def _setup_hooks(cfg) -> None:
     """Show the exact entry going into settings.json, then write it."""
     url = _url(cfg)
     shown = url.split("?", 1)[0] + "?token=<your local token>"
-    entry = {"matcher": "*", "hooks": [{"type": "http", "url": shown}]}
+    entry = {"matcher": "*", "hooks": [installer.bol_hook(shown)]}
     path = installer.settings_path("user")
     print(f"hooks: adding one entry per event to {path}")
     print(f"  events: {', '.join(installer.EVENTS)} (matcher only on PostToolUse)")
     for line in json.dumps(entry, indent=2).splitlines():
         print(f"  {line}")
+    print("  async, so Claude never waits on Bol; silent when Bol is not running.")
     installer.install(url)
     print("hooks installed. Restart running Claude Code sessions to pick them up.")
 
