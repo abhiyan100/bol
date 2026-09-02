@@ -10,6 +10,11 @@ from ..config import Config
 log = logging.getLogger("bol.stt")
 
 
+# Put this on a live stream's block queue to end the loop. None rather than a
+# sentinel object so anything that can hold blocks can also carry the stop.
+STREAM_END = None
+
+
 class Transcriber(Protocol):
     async def transcribe(self, audio: np.ndarray, sample_rate: int) -> str: ...
     async def warmup(self) -> None: ...

@@ -126,10 +126,29 @@ def label_for(state: str, text: str = "", detail: str = "") -> str:
     if state == "permission":
         head = f"Claude asks: {text}" if text else "Claude needs your permission"
         return truncate_middle(f"{head}{SEPARATOR}{PERMISSION_HINT}", MAX_CHARS)
+    if state == "listening" and detail:
+        # Live dictation: text is what the decoder has committed and detail is
+        # the tail it is still deciding on. One sentence, so they join with a
+        # space rather than the field separator, and the words replace the
+        # "Listening" default instead of being appended to it.
+        return truncate_middle(f"{text} {detail}".strip(), MAX_CHARS)
     head = text or DEFAULTS.get(state, "")
     if detail:
         head = f"{head}{SEPARATOR}{detail}" if head else detail
     return truncate_middle(head, MAX_CHARS)
+
+
+def draft_span(state: str, label: str, detail: str) -> int:
+    """How many characters at the end of the label are unconfirmed draft.
+
+    The panel dims exactly this many. Zero whenever the answer is not certain:
+    the label may have been truncated in the middle, and dimming the wrong run
+    of a sentence is worse than dimming none of it.
+    """
+    detail = _clean(detail)
+    if state != "listening" or not detail or not isinstance(label, str):
+        return 0
+    return len(detail) if label.endswith(detail) else 0
 
 
 def color_for(state: str) -> str:

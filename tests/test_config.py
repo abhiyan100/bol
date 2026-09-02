@@ -49,6 +49,8 @@ def test_the_default_file_matches_the_dataclasses():
         assert getattr(cfg.audio, key) == value, key
     for key, value in data["ui"].items():
         assert getattr(cfg.ui, key) == value, key
+    for key, value in data["stt"].items():
+        assert getattr(cfg.stt, key) == value, key
 
 
 def test_load_config_applies_the_new_fields(tmp_path):
@@ -178,3 +180,24 @@ def test_the_daemon_validates_at_startup():
     cfg.hotkey.mode = "typo"
     with pytest.raises(ValueError):
         Daemon(cfg, text_mode=True)
+
+
+def test_live_words_are_on_with_a_context_that_actually_streams():
+    cfg = Config()
+    assert cfg.stt.live is True
+    # parakeet-mlx's own default right context of 256 frames is 20 seconds of
+    # held-back text. 16 frames commits a word after 1.3 s, which is a pill
+    # you can read while you talk.
+    assert cfg.stt.stream_context == [256, 16]
+    assert cfg.stt.stream_chunk_ms == 320
+
+
+def test_load_config_applies_the_streaming_fields(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[stt]\nlive = false\nstream_context = [256, 8]\nstream_chunk_ms = 160\n"
+    )
+    cfg = load_config(path)
+    assert cfg.stt.live is False
+    assert cfg.stt.stream_context == [256, 8]
+    assert cfg.stt.stream_chunk_ms == 160

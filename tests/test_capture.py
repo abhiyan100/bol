@@ -6,6 +6,7 @@ InputStream pumps scripted blocks at the recorder's callback.
 
 import asyncio
 import logging
+import queue as _queue
 import types
 
 import numpy as np
@@ -406,3 +407,95 @@ async def test_until_silence_set_mid_recording_endpoints_the_utterance(
     blocks = audio.size // BLOCK
     # 4 + 8 plus the three silence blocks that endpointed it, not the cap.
     assert 12 <= blocks <= 18
+
+
+# ------------------------------------------------------------------- the tap
+
+
+def _tapped(tap):
+    """Everything a queue tap has been handed so far, as one array."""
+    blocks = []
+    while True:
+        try:
+            blocks.append(tap.get_nowait())
+        except _queue.Empty:
+            break
+    return np.concatenate(blocks) if blocks else np.zeros(0, dtype=np.float32)
+
+
+async def test_the_tap_sees_the_same_audio_as_the_recording(monkeypatch):
+    # The live decoder's copy. It may run a block ahead of the buffer (the
+    # sink hops through the event loop and the tap does not), but it must
+    # never be a different recording.
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    session.tap = _queue.Queue()
+    _fake_sd(monkeypatch, _speech(10), on_exhausted=session.request_stop)
+
+    audio = await _record(recorder, session, until_silence=False)
+    heard = _tapped(session.tap)
+
+    assert audio is not None
+    assert heard.size >= audio.size
+    assert np.array_equal(heard[: audio.size], audio)
+
+
+async def test_the_tap_gets_the_pre_roll_before_the_live_blocks(monkeypatch):
+    # The word that started before the key went down is exactly the word a
+    # live view must not open by missing.
+    recorder = Recorder(_cfg(pre_roll_ms=90))
+    first = recorder.begin()
+    opened = _fake_sd(monkeypatch, _speech(4), on_exhausted=first.request_stop)
+
+    await _record(recorder, first, until_silence=False, close=False)
+    stream = opened[0]
+    stream.feed(_silence(6))  # room tone, with nobody recording
+    await asyncio.sleep(0.05)
+
+    second = recorder.begin()
+    second.tap = _queue.Queue()
+    stream.feed(_speech(8), on_exhausted=second.request_stop)
+    audio = await _record(recorder, second, until_silence=False)
+    heard = _tapped(second.tap)
+
+    assert audio is not None
+    assert np.array_equal(heard[: audio.size], audio)
+    # The first three blocks are the ring's room tone, ahead of the speech.
+    assert float(np.sqrt(np.mean(heard[: 3 * BLOCK] ** 2))) < 0.01
+    assert float(np.sqrt(np.mean(heard[3 * BLOCK : 6 * BLOCK] ** 2))) > 0.05
+
+
+async def test_a_tap_that_raises_never_costs_the_recording(monkeypatch):
+    # The tap runs on PortAudio's thread. A listener that died has to be a
+    # non-event: the recording is the thing the user actually asked for.
+    def angry(_block):
+        raise RuntimeError("the live decoder fell over")
+
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    session.tap = angry
+    _fake_sd(monkeypatch, _speech(10), on_exhausted=session.request_stop)
+
+    audio = await _record(recorder, session, until_silence=False)
+
+    assert audio is not None
+    assert audio.size >= 8 * BLOCK
+
+
+async def test_the_tap_stops_when_its_recording_does(monkeypatch):
+    # The stream stays warm between recordings; the tap must not, or the
+    # decoder would keep transcribing the room after the key came up.
+    recorder = Recorder(_cfg())
+    session = recorder.begin()
+    session.tap = _queue.Queue()
+    opened = _fake_sd(monkeypatch, _speech(6), on_exhausted=session.request_stop)
+
+    await _record(recorder, session, until_silence=False, close=False)
+    during = _tapped(session.tap).size
+    opened[0].feed(_speech(8))  # the warm stream keeps running
+    await asyncio.sleep(0.05)
+    after = _tapped(session.tap).size
+    await recorder.close()
+
+    assert during > 0
+    assert after == 0

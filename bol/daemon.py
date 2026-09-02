@@ -10,12 +10,17 @@ watches it appear in the TUI exactly like typing. With [hotkey] submit =
 shorter text, a "type ..." prefix, and submit = "voice" all paste without it,
 and "send it" always submits. The Stop hook closes the loop by speaking what
 happened.
+
+While the user is still talking the pill shows the words as they are decoded.
+That path is display only and stops at the pill: the text that reaches Claude
+is always the one full-buffer decode taken after the recording ends.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import sys
 from pathlib import Path
 
@@ -30,7 +35,7 @@ from .hotkey import HotkeyListener
 from .hud import Hud, tool_line
 from .llm import LLMEngine
 from .speak import build_speaker, play_cue
-from .stt import build_transcriber
+from .stt import STREAM_END, build_transcriber
 from .summarize import build_summarizer
 
 log = logging.getLogger("bol")
@@ -47,6 +52,69 @@ def _drain(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc is not None:
         log.warning("background task failed: %s", exc)
+
+
+# How often the pill may be redrawn with streamed words. Past about four a
+# second a line of text reads as flicker, and every redraw is a write down a
+# pipe to another process.
+LIVE_PILL_HZ = 4.0
+
+
+class _LiveWords:
+    """Streamed partials on their way to the pill.
+
+    The decoder reports after every step, and after a stall it reports several
+    in a row, so the updates are rate limited with the last one always
+    delivered. Everything after close() is dropped: that recording is over and
+    the next line on the pill belongs to Finalizing.
+    """
+
+    def __init__(self, hud, loop, interval: float = 1.0 / LIVE_PILL_HZ) -> None:
+        self.hud = hud
+        self.blocks: queue.Queue | None = None
+        self._loop = loop
+        self._interval = interval
+        self._last: float | None = None
+        self._pending: tuple[str, str] | None = None
+        self._timer = None
+        self._closed = False
+
+    def emit(self, committed: str, draft: str) -> None:
+        """Called from the decoder, already hopped onto the event loop."""
+        if self._closed:
+            return
+        now = self._loop.time()
+        if self._last is not None and now - self._last < self._interval:
+            self._pending = (committed, draft)
+            if self._timer is None:
+                self._timer = self._loop.call_later(
+                    self._interval - (now - self._last), self._flush
+                )
+            return
+        self._show(committed, draft)
+
+    def _flush(self) -> None:
+        self._timer = None
+        pending, self._pending = self._pending, None
+        if pending is not None and not self._closed:
+            self._show(*pending)
+
+    def _show(self, committed: str, draft: str) -> None:
+        self._last = self._loop.time()
+        if not committed and not draft:
+            return  # nothing decoded yet, so leave "Listening" where it is
+        self.hud.set("listening", committed, draft)
+
+    def close(self) -> None:
+        """End the decode and stop writing to the pill. Safe to call twice."""
+        self._closed = True
+        self._pending = None
+        timer, self._timer = self._timer, None
+        if timer is not None:
+            timer.cancel()
+        blocks, self.blocks = self.blocks, None
+        if blocks is not None:
+            blocks.put_nowait(STREAM_END)
 
 
 class Daemon:
@@ -258,15 +326,64 @@ class Daemon:
         finally:
             self._pending_listen = False
 
+    def _start_live(self, session) -> _LiveWords | None:
+        """Put words in the pill while this recording runs, if we can.
+
+        Returns the handle to close when the recording ends, or None when
+        there is nothing to stream: text mode, [stt] engine = "none", live
+        turned off, or a transcriber with no streaming decoder.
+        """
+        if not self.cfg.stt.live or self.text_mode:
+            return None
+        stream = getattr(self.transcriber, "stream", None)
+        if stream is None:
+            return None
+        loop = asyncio.get_running_loop()
+        live = _LiveWords(self.hud, loop, 1.0 / LIVE_PILL_HZ)
+        # A thread-safe queue, not an asyncio one: the audio callback fills it
+        # from PortAudio's thread and the decoder drains it on the MLX thread.
+        live.blocks = queue.Queue()
+        session.tap = live.blocks
+        loop.create_task(self._run_live(stream, live)).add_done_callback(_drain)
+        return live
+
+    async def _run_live(self, stream, live: _LiveWords) -> None:
+        blocks = live.blocks
+        if blocks is None:
+            return
+        try:
+            await stream(
+                blocks,
+                live.emit,
+                context_size=self.cfg.stt.stream_context,
+                chunk_ms=self.cfg.stt.stream_chunk_ms,
+                sample_rate=self.cfg.audio.sample_rate,
+            )
+        except Exception as exc:
+            # Debug, once per recording, and that is all: these words are a
+            # courtesy, and the decode that decides what Claude gets still
+            # runs on the finished recording either way.
+            log.debug("live words failed: %s", exc)
+
     async def _capture_and_handle(self, session, until_silence: bool) -> bool:
         self._active_session = session
         self._active_hands_free = until_silence
         try:
+            live = self._start_live(session)
             try:
-                # Fired, not awaited, and before record() so the chime and the
-                # mic open together instead of one after the other.
-                self._cue("listen")
-                audio = await self.recorder.record(session, until_silence=until_silence)
+                try:
+                    # Fired, not awaited, and before record() so the chime and
+                    # the mic open together, not one after the other.
+                    self._cue("listen")
+                    audio = await self.recorder.record(
+                        session, until_silence=until_silence
+                    )
+                finally:
+                    # However the recording ended, the live decoder stops
+                    # here, before anything else claims the pill: nothing
+                    # streamed may land on it after this line.
+                    if live is not None:
+                        live.close()
             except Exception as exc:
                 # A dead input device (headphones unplugged, another app
                 # grabbing the mic) used to surface only as an unretrieved

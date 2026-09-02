@@ -40,6 +40,17 @@ class AudioConfig:
 class SttConfig:
     engine: str = "parakeet"  # parakeet | none (text mode)
     parakeet_model: str = "mlx-community/parakeet-tdt-0.6b-v3"
+    # Show words in the pill while you speak. Display only: the text that
+    # reaches Claude always comes from the full-buffer decode afterwards.
+    live: bool = True
+    # (left, right) attention context for the streaming decoder, in encoder
+    # frames of 80 ms. The right half is the finalization lag, so parakeet-mlx's
+    # documented default of (256, 256) holds every word back for 20 seconds.
+    # (256, 16) commits after 1.3 s; (256, 8) is faster and slightly less sure.
+    stream_context: list = field(default_factory=lambda: [256, 16])
+    # Audio handed to the streaming decoder per step. Smaller updates the pill
+    # more often and costs more decodes per second.
+    stream_chunk_ms: int = 320
 
 
 @dataclass
@@ -273,6 +284,12 @@ warm_s = 120           # hold the mic stream open this long after a recording, t
 
 [stt]
 engine = "parakeet"    # or "none" for text-only mode
+live = true            # show words in the pill while you talk (display only)
+# stream_context = [256, 16]  # (left, right) attention frames of 80 ms. The right
+#                             # half is how long a word waits before it is committed,
+#                             # so parakeet-mlx's own default of [256, 256] would
+#                             # hold your text back for 20 seconds. [256, 8] is faster.
+# stream_chunk_ms = 320       # audio per streaming decode; smaller redraws more often
 
 [tts]
 engine = "say"         # or "kokoro" (pip install 'bol[kokoro]')

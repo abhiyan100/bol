@@ -17,6 +17,7 @@ from bol.hud.render import (
     STATES,
     Update,
     color_for,
+    draft_span,
     hold_for,
     label_for,
     parse_line,
@@ -66,6 +67,35 @@ def test_thinking_carries_the_tool_line():
     assert label_for("thinking", "Thinking", "Bash: pytest -q") == (
         "Thinking · Bash: pytest -q"
     )
+
+
+def test_listening_shows_the_committed_words_then_the_draft():
+    # One sentence being spoken, not two fields: the draft continues the
+    # committed text, so it joins with a space and not the field separator.
+    assert label_for("listening", "add a login", "test for the") == (
+        "add a login test for the"
+    )
+    assert label_for("listening", "", "add a") == "add a"
+    assert label_for("listening", "add a login test") == "add a login test"
+    assert label_for("listening") == "Listening"
+
+
+def test_the_draft_is_the_part_the_panel_dims():
+    label = label_for("listening", "add a login", "test for the")
+    assert draft_span("listening", label, "test for the") == len("test for the")
+    # Nothing is dimmed on any other state, whatever the detail says.
+    assert draft_span("thinking", "Thinking · Bash: pytest", "Bash: pytest") == 0
+    assert draft_span("listening", label, "") == 0
+
+
+def test_a_draft_the_panel_had_to_cut_is_not_dimmed():
+    # truncate_middle keeps both ends, so a long draft comes back missing its
+    # middle. Dimming the wrong run of a sentence is worse than dimming none.
+    committed = "the quick brown fox " * 6
+    draft = "jumped over the lazy dog and kept going " * 3
+    label = label_for("listening", committed, draft)
+    assert len(label) == MAX_CHARS
+    assert draft_span("listening", label, draft) == 0
 
 
 def test_speaking_shows_bols_own_sentence():

@@ -99,9 +99,10 @@ and is sent. **Hold** it instead for push-to-talk: release to send. The mic
 is live on the keystroke, with 300 ms of pre-roll, so the first word is never
 lost. Anything under three words is pasted without Enter, so a stray "yes"
 never reaches Claude unread. A small pill at the top of the screen shows
-what Bol is doing: Listening, Finalizing, Sent, Thinking with the tool Claude
-is running, the permission question, what Bol is saying, and any error with
-its fix. It never takes focus. Voice commands ride on your speech:
+what Bol is doing: your words as you say them, Finalizing, Sent, Thinking
+with the tool Claude is running, the permission question, what Bol is
+saying, and any error with its fix. It never takes focus, and the live words
+never touch the terminal: only the final, full-accuracy decode is pasted. Voice commands ride on your speech:
 
 | You say | Bol does |
 |---|---|

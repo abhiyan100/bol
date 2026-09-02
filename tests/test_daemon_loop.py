@@ -3,6 +3,8 @@ reviews confirmed (session-token stops, hands-free chaining, multi-session
 hook affinity, mic failures)."""
 
 import asyncio
+import logging
+import queue as _queue
 
 import numpy as np
 import pytest
@@ -657,3 +659,275 @@ async def test_a_transcription_failure_turns_the_pill_red():
         ("finalizing", "Finalizing", ""),
         ("error", "Couldn't transcribe that one. Try again.", ""),
     ]
+
+
+# ------------------------------------------------------------- live words
+
+
+class LiveRecorder(FakeRecorder):
+    """A recorder that takes long enough for partials to arrive, and that
+    remembers whether the daemon handed the recording a tap."""
+
+    def __init__(self, utterance_count, pause=0.02):
+        super().__init__(utterance_count)
+        self.pause = pause
+        self.taps = []
+
+    async def record(self, session, until_silence):
+        self.taps.append(session.tap)
+        await asyncio.sleep(self.pause)
+        return await super().record(session, until_silence)
+
+
+class LiveTranscriber(FakeTranscriber):
+    """Reports scripted partials, then waits for the daemon's sentinel the
+    way the real streaming loop does."""
+
+    def __init__(self, texts, partials=(("add a", "login"), ("add a login", "test"))):
+        super().__init__(texts)
+        self.partials = list(partials)
+        self.stream_args = []
+        self.ended = False
+        self.fail = False
+
+    async def stream(self, blocks, emit, *, context_size, chunk_ms, sample_rate):
+        self.stream_args.append((context_size, chunk_ms, sample_rate))
+        if self.fail:
+            raise RuntimeError("this model does not stream")
+        for committed, draft in self.partials:
+            emit(committed, draft)
+            await asyncio.sleep(0)
+        while True:
+            try:
+                item = blocks.get_nowait()
+            except _queue.Empty:
+                await asyncio.sleep(0.001)
+                continue
+            if item is None:
+                self.ended = True
+                return
+
+
+def _live_daemon(monkeypatch, texts, partials=None, pause=0.02):
+    d = _daemon(1, list(texts))
+    # One recording, so the assertions are about one pill and one decode.
+    d.cfg.hands_free = False
+    # The throttle has its own tests; here it must not swallow a partial.
+    monkeypatch.setattr(daemon_mod, "LIVE_PILL_HZ", 1000.0)
+    d.recorder = LiveRecorder(1, pause=pause)
+    kwargs = {} if partials is None else {"partials": partials}
+    d.transcriber = LiveTranscriber(list(texts), **kwargs)
+    return d
+
+
+@pytest.mark.asyncio
+async def test_the_pill_shows_words_while_you_are_still_talking(monkeypatch):
+    d = _live_daemon(monkeypatch, ["add a login test for the parser"])
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    # Committed and draft arrive apart, so the panel can dim the unsure half.
+    listening = [c for c in d.hud.calls if c[0] == "listening"]
+    assert listening == [
+        ("listening", "add a", "login"),
+        ("listening", "add a login", "test"),
+    ]
+    # And they are on screen before the mic closes, not after.
+    assert d.hud.states.index("finalizing") > d.hud.states.index("listening")
+
+
+@pytest.mark.asyncio
+async def test_partial_words_never_reach_claude(monkeypatch):
+    # The whole safety property of the phase: the pill is a mirror, and the
+    # bridge only ever sees the full-buffer decode.
+    d = _live_daemon(monkeypatch, ["add a login test for the parser"])
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert d.bridge.injected == [("add a login test for the parser ", False)]
+    await asyncio.sleep(0.01)  # the fake decoder polls its queue
+    assert d.transcriber.ended  # the sentinel was delivered
+    assert d.recorder.taps and d.recorder.taps[0] is not None
+
+
+@pytest.mark.asyncio
+async def test_the_live_decoder_gets_the_configured_stream_settings(monkeypatch):
+    d = _live_daemon(monkeypatch, ["add a login test"])
+    d.cfg.stt.stream_context = [256, 8]
+    d.cfg.stt.stream_chunk_ms = 160
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert d.transcriber.stream_args == [([256, 8], 160, d.cfg.audio.sample_rate)]
+
+
+@pytest.mark.asyncio
+async def test_nothing_streamed_lands_on_the_pill_after_the_recording(monkeypatch):
+    # A partial that arrives late would overwrite "Finalizing" with a
+    # half-decoded sentence, right when the user is waiting on the real one.
+    d = _live_daemon(monkeypatch, ["add a login test"], partials=[])
+
+    async def stream(blocks, emit, **kwargs):
+        while True:
+            try:
+                item = blocks.get_nowait()
+            except _queue.Empty:
+                await asyncio.sleep(0.001)
+                continue
+            if item is None:
+                # The decoder finishing one step behind the sentinel: this
+                # word is already stale and must go nowhere.
+                emit("too", "late")
+                return
+
+    d.transcriber.stream = stream
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+    await asyncio.sleep(0.01)
+
+    assert "listening" not in d.hud.states
+    assert d.hud.states[0] == "finalizing"
+
+
+@pytest.mark.asyncio
+async def test_live_off_means_no_stream_and_no_tap(monkeypatch):
+    d = _live_daemon(monkeypatch, ["add a login test"])
+    d.cfg.stt.live = False
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert d.transcriber.stream_args == []
+    assert d.recorder.taps == [None]
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_transcriber_that_cannot_stream_is_simply_not_asked(monkeypatch):
+    # [stt] engine = "none" leaves no transcriber at all, and an engine
+    # without a streaming decoder must not break the recording either.
+    d = _daemon(1, ["add a login test"])
+    d.cfg.hands_free = False
+    monkeypatch.setattr(daemon_mod, "LIVE_PILL_HZ", 1000.0)
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert not hasattr(d.transcriber, "stream")
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_live_decoder_costs_the_words_and_nothing_else(caplog):
+    d = _daemon(1, ["add a login test"])
+    d.cfg.hands_free = False
+    d.recorder = LiveRecorder(1)
+    d.transcriber = LiveTranscriber(["add a login test"])
+    d.transcriber.fail = True
+
+    with caplog.at_level(logging.DEBUG, logger="bol"):
+        await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert "listening" not in d.hud.states
+    assert d.bridge.injected == [("add a login test ", False)]
+    failures = [r for r in caplog.records if "live words failed" in r.getMessage()]
+    assert len(failures) == 1  # once, at debug, per recording
+
+
+# ----------------------------------------------------------- the throttle
+
+
+class FakeLoop:
+    """Just the clock and the timer _LiveWords uses, under the test's thumb."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.timers = []
+
+    def time(self):
+        return self.now
+
+    def call_later(self, delay, fn):
+        timer = _Timer(fn)
+        self.timers.append((self.now + delay, timer))
+        return timer
+
+    def advance(self, seconds):
+        self.now += seconds
+        due = [(at, t) for at, t in self.timers if at <= self.now]
+        self.timers = [(at, t) for at, t in self.timers if at > self.now]
+        for _at, timer in due:
+            timer.fire()
+
+
+class _Timer:
+    def __init__(self, fn):
+        self.fn = fn
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        if not self.cancelled:
+            self.fn()
+
+
+def _live_words(interval=0.25):
+    hud = FakeHud()
+    loop = FakeLoop()
+    return hud, loop, daemon_mod._LiveWords(hud, loop, interval)
+
+
+def test_a_burst_of_partials_redraws_the_pill_once():
+    hud, loop, live = _live_words()
+    live.emit("add", "a")
+    live.emit("add a", "login")
+    live.emit("add a login", "test")
+
+    assert hud.calls == [("listening", "add", "a")]  # the first one, at once
+
+
+def test_the_last_partial_of_a_burst_is_always_delivered():
+    hud, loop, live = _live_words()
+    live.emit("add", "a")
+    live.emit("add a", "login")
+    live.emit("add a login", "test")
+    loop.advance(0.25)
+
+    # Not the middle one: the newest text is the only one worth showing.
+    assert hud.calls == [
+        ("listening", "add", "a"),
+        ("listening", "add a login", "test"),
+    ]
+
+
+def test_closing_drops_the_pending_redraw_and_ends_the_decode():
+    hud, loop, live = _live_words()
+    live.blocks = _queue.Queue()
+    live.emit("add", "a")
+    live.emit("add a", "login")
+    live.close()
+    loop.advance(1.0)
+
+    assert hud.calls == [("listening", "add", "a")]
+    assert live.blocks is None
+    assert live.emit("anything", "at all") is None
+    assert hud.calls == [("listening", "add", "a")]
+
+
+def test_closing_twice_is_harmless():
+    hud, loop, live = _live_words()
+    live.blocks = _queue.Queue()
+    blocks = live.blocks
+    live.close()
+    live.close()
+
+    assert blocks.get_nowait() is None
+    assert blocks.empty()
+
+
+def test_an_empty_partial_leaves_listening_alone():
+    # Before the first word is decoded there is nothing to say, and blanking
+    # the pill would read as the microphone having died.
+    hud, loop, live = _live_words()
+    live.emit("", "")
+
+    assert hud.calls == []

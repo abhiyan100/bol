@@ -17,7 +17,7 @@ import argparse
 import sys
 import threading
 
-from .render import Update, hold_for, parse_line, render, truncate_middle
+from .render import Update, draft_span, hold_for, parse_line, render, truncate_middle
 
 # Pill geometry, in points.
 HEIGHT = 30.0
@@ -35,6 +35,9 @@ FADE_OUT_S = 0.20
 # The 13 pt system font averages a little under this per character; it only
 # has to be close, the text cell truncates whatever is left over.
 CHAR_WIDTH = 7.0
+# Words the decoder has not committed yet are drawn at this alpha, so the
+# sentence visibly settles from the left instead of rewriting itself.
+DRAFT_ALPHA = 0.6
 
 # sRGB dot colours, keyed by the names render.color_for returns.
 DOT_COLORS = {
@@ -43,6 +46,11 @@ DOT_COLORS = {
     "amber": (1.00, 0.72, 0.23),
     "red": (1.00, 0.32, 0.28),
 }
+
+
+def _utf16_len(text: str) -> int:
+    """Length in UTF-16 units, which is what an NSRange is measured in."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
 
 
 class Pill:
@@ -134,15 +142,15 @@ class Pill:
         if not label:
             self.hide()
             return
-        self.show(label, color)
+        self.show(label, color, update.detail if update.state == "listening" else "")
         hold = hold_for(update.state)
         if hold:
             self._timer = self.AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                 hold, False, lambda _timer: self.hide()
             )
 
-    def show(self, text: str, color: str) -> None:
-        self._layout(text, color)
+    def show(self, text: str, color: str, draft: str = "") -> None:
+        self._layout(text, color, draft)
         if self._visible:
             return
         self._visible = True
@@ -165,7 +173,7 @@ class Pill:
 
     # ----------------------------------------------------------------- layout
 
-    def _layout(self, text: str, color: str) -> None:
+    def _layout(self, text: str, color: str, draft: str = "") -> None:
         AppKit = self.AppKit
         screen = self._screen()
         area = screen.visibleFrame()
@@ -174,7 +182,10 @@ class Pill:
         room = max(CHAR_WIDTH, max_width - lead - PAD_X)
         text = truncate_middle(text, max(8, int(room / CHAR_WIDTH)))
 
-        self.label.setStringValue_(text)
+        # Measured after truncation, so a draft the panel had to cut is drawn
+        # solid rather than dimmed in the wrong place.
+        dim = draft_span("listening", text, draft) if draft else 0
+        self.label.setAttributedStringValue_(self._attributed(text, dim))
         # sizeToFit is the only measurement that agrees with the cell's own
         # insets; a bare string measurement is a couple of points short, and
         # the cell answers by truncating a label that would have fitted.
@@ -202,6 +213,32 @@ class Pill:
         else:
             y = area.origin.y + area.size.height - HEIGHT - TOP_INSET
         self.panel.setFrame_display_(AppKit.NSMakeRect(x, y, width, HEIGHT), True)
+
+    def _attributed(self, text: str, dim: int):
+        """The label's string, with the last `dim` characters faded out."""
+        AppKit = self.AppKit
+        white = AppKit.NSColor.whiteColor()
+        string = AppKit.NSMutableAttributedString.alloc().initWithString_attributes_(
+            text,
+            {
+                AppKit.NSFontAttributeName: self.font,
+                AppKit.NSForegroundColorAttributeName: white,
+            },
+        )
+        if dim:
+            # NSRange counts UTF-16 units and Python counts code points, so an
+            # emoji anywhere in the line would otherwise put the range past the
+            # end of the string and take the window down.
+            total, tail = _utf16_len(text), _utf16_len(text[-dim:])
+            try:
+                string.addAttribute_value_range_(
+                    AppKit.NSForegroundColorAttributeName,
+                    white.colorWithAlphaComponent_(DRAFT_ALPHA),
+                    (total - tail, tail),
+                )
+            except Exception as exc:  # noqa: BLE001 - dim text is decoration
+                sys.stderr.write(f"bol.hud: could not dim the draft ({exc})\n")
+        return string
 
     def _screen(self):
         """The screen the user is looking at.

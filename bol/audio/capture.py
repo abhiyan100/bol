@@ -28,6 +28,12 @@ flips mid-recording.
 
 Energy VAD is deliberately simple (RMS vs. an adaptive noise floor). It's a
 protocol seam: swap in Silero later without touching the daemon.
+
+A recording can also carry a tap: set session.tap before record() and every
+block of that recording, pre-roll included, is handed to it as it arrives. The
+tap is a copy for someone watching (the live transcriber that puts words in the
+pill); the recording buffer this function returns stays authoritative, and a
+tap that raises, fills up, or goes away never touches the recording.
 """
 
 from __future__ import annotations
@@ -80,6 +86,23 @@ def _resolve_input_device(spec: str) -> int | None:
     )
 
 
+def _feed_tap(tap, block: np.ndarray) -> None:
+    """Hand one block to a recording's tap, on PortAudio's thread.
+
+    Swallows everything. The tap is a spectator: a full queue or a listener
+    that has already gone away must never cost the recording a block, and an
+    exception raised here would take the whole audio callback down with it.
+    """
+    try:
+        put = getattr(tap, "put_nowait", None)
+        if put is not None:
+            put(block)
+        else:
+            tap(block)
+    except Exception:  # noqa: BLE001 - see the docstring
+        pass
+
+
 class RecordingSession:
     """Stop token for one recording. Mint via Recorder.begin() at the event
     that starts the recording (hotkey press / auto-listen decision).
@@ -87,13 +110,18 @@ class RecordingSession:
     until_silence is mutable and read every loop iteration: a tap sets it
     after the recording is already running, which turns "record while held"
     into "record until they stop talking" without restarting the mic.
+
+    tap is optional and set before record(): a queue.Queue (thread-safe, since
+    the audio callback fills it from PortAudio's thread) or any callable that
+    takes one block. It sees every block this recording captures.
     """
 
-    __slots__ = ("_stop", "until_silence")
+    __slots__ = ("_stop", "until_silence", "tap")
 
     def __init__(self, until_silence: bool = False) -> None:
         self._stop = asyncio.Event()
         self.until_silence = until_silence
+        self.tap = None
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -113,6 +141,8 @@ class Recorder:
         self._loop: asyncio.AbstractEventLoop | None = None
         # Set for the duration of one recording; the callback reads it once.
         self._sink: asyncio.Queue[np.ndarray] | None = None
+        # The live listener for the recording in flight, if it asked for one.
+        self._tap = None
         self._ring: deque[np.ndarray] = deque(maxlen=max(1, _RING_MS // _BLOCK_MS))
         self._warm_task: asyncio.Task | None = None
         self._logged_latency = False
@@ -145,6 +175,11 @@ class Recorder:
         sink, loop = self._sink, self._loop
         if sink is not None and loop is not None:
             loop.call_soon_threadsafe(sink.put_nowait, block)
+        # Fed straight from this thread: the tap is a thread-safe queue on
+        # purpose, so the words on screen don't wait for the event loop.
+        tap = self._tap
+        if tap is not None:
+            _feed_tap(tap, block)
 
     def _build(self) -> None:
         cfg = self._cfg
@@ -231,6 +266,7 @@ class Recorder:
         """Release the device and forget the stream (daemon shutdown)."""
         self._cancel_warm()
         self._sink = None
+        self._tap = None
         self._discard()
 
     def _pre_roll(self) -> list[np.ndarray]:
@@ -263,6 +299,8 @@ class Recorder:
         self._cancel_warm()
         queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
 
+        tap = session.tap
+
         try:
             if self._stream is None:
                 self._build()
@@ -270,11 +308,18 @@ class Recorder:
             # Snapshot before the sink is armed, so a block cannot land in
             # both. Losing the seam block costs 30 ms; doubling it stutters.
             pre_roll = self._pre_roll() if was_running else []
+            if tap is not None:
+                # The tap gets the pre-roll before it is armed, so the live
+                # decoder hears the opening syllable in the right order.
+                for block in pre_roll:
+                    _feed_tap(tap, block)
             self._sink = queue
+            self._tap = tap
             if not was_running:
                 self._start_stream()
         except Exception:
             self._sink = None
+            self._tap = None
             self._discard()  # dead device: the next press builds a new stream
             raise
 
@@ -285,6 +330,7 @@ class Recorder:
             raise
         finally:
             self._sink = None
+            self._tap = None
             self._schedule_warm_release()
 
     async def _pump(

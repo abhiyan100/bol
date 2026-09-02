@@ -128,6 +128,18 @@ energy and hysteresis on release. The hotkey listener checks pynput's
 `IS_TRUSTED` after start and raises a clear Input Monitoring error instead
 of silently never firing.
 
+**Live words are display only.** While a recording runs, the same blocks
+that fill the authoritative buffer are also tapped into parakeet-mlx's
+streaming decoder (`transcribe_stream`, context (256, 16): the documented
+default of (256, 256) holds text back for 20 s, since finalization lags by
+`context_size[1] * depth` frames of 80 ms). One call on the MLX thread owns
+the whole recording; partials go to the pill at 4 Hz, committed text solid
+and draft text dim. They never reach the bridge: the final text is always
+the full-buffer decode, then the grammar, then one paste. Measured on a
+7 s clip: first partial after about 2.5 s, 2.6 updates per second, peak RSS
+0.9 GB, and the streamed text missed the opening two seconds while the full
+decode was exact. That blind spot is a known open item.
+
 **The pill is a separate process.** State on screen (listening, finalizing,
 thinking with the running tool, permission, speaking, error with its remedy)
 is drawn by `bol/hud/app.py`, a PyObjC child fed JSON lines over stdin. Not
