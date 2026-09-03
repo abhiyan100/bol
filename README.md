@@ -7,17 +7,17 @@
 [![platform](https://img.shields.io/badge/macOS-Apple%20Silicon-black.svg)](#install)
 [bol-voice.vercel.app](https://bol-voice.vercel.app)
 
-[![Bol in 30 seconds: say type, talk, say send it](docs/media/bol-launch.gif)](https://github.com/abhiyan100/bol/releases/download/v0.5.0/bol-launch.mp4)
+[![Bol in 30 seconds: say hey Bol, talk, say send it](docs/media/bol-launch.gif)](https://github.com/abhiyan100/bol/releases/download/v0.5.0/bol-launch.mp4)
 
 [Watch with sound](https://github.com/abhiyan100/bol/releases/download/v0.5.0/bol-launch.mp4) (31 s, 4 MB).
 
-Say "type" and talk. Pause, and the words land where your cursor is. Say
+Say "hey Bol" and talk. Pause, and the words land where your cursor is. Say
 "send it" and Enter is pressed. Bol listens from the moment it starts, runs
 every model on your Mac, and sends nothing anywhere. Turn on talk-back and
 it also tells you out loud what your coding agent did when the turn ends.
 
 ```
-you    "type, add a login test for the parser and run pytest"   (pause)
+you    "hey Bol, add a login test for the parser and run pytest"   (pause)
 bol    pastes it into Claude Code, no Enter
 you    "send it"
 claude ...edits files, runs tests, finishes...
@@ -61,13 +61,15 @@ nothing sent until you say so.
 
 | Do this | Bol does |
 |---|---|
-| Say **"type"**, talk, pause 2 s | pastes what you said, no Enter |
+| Say **"hey Bol"**, talk, pause 2 s | pastes what you said, no Enter |
 | **Hold right Option**, talk, release | same, for noisy rooms |
 | Say **"send it"** (or "send", "enter") | presses Enter, wherever you are; after a paste Bol listens ten seconds for it with nothing on screen |
-| Say **"scratch that"** | clears what Bol pasted |
+| Say **"scratch that"** (or "scratch", "clear it") | clears the whole input box, not just the line |
 | Say **"stop listening"** | pauses the ear; press the key to resume |
-| Say **"hey Bol ..."** | the conversation flow, with talk-back on |
 | Say **"go ahead"** / **"no"** | answers a permission prompt |
+
+With talk-back on, "hey Bol" starts the conversation flow instead: Bol answers
+out loud and keeps the microphone for your reply.
 
 Works in Claude Code, Codex, Cursor, Terminal, Notes, Slack, a browser
 field: anywhere you can type. A small pill at the top of the screen shows a
@@ -93,7 +95,7 @@ hooks; accept it when it appears.
 ## How it works
 
 ```
- "type" / hold key            your editor, terminal or agent (unchanged)
+ "hey Bol" / hold key         your editor, terminal or agent (unchanged)
         |                              ^                  |
         v                              | paste, Enter     | Stop / PostToolUse /
  keyword spotter (5 MB) ---+           |                  | Notification hooks
@@ -139,9 +141,11 @@ talk_back = false            # true: hear what the agent did after each turn
 
 [wake]
 enabled = true               # listen for trigger words from the start
-type_phrases = ["type"]      # change to "start typing" if "type" fires too often
+phrases = ["hey bol"]        # the trigger for everything
+type_phrases = []            # ["type"]: a short extra trigger word for dictation,
+                             # off because one syllable false-fires in a real room
 send_phrases = ["send it", "send", "enter"]
-pause_ms = 2000              # a pause this long ends a "type" dictation
+pause_ms = 2000              # a pause this long ends a dictation
 speak_window_ms = 5000       # how long the pill waits for you to start talking
 awake_s = 0                  # 60: follow-ups need no trigger word for a minute
 
@@ -170,7 +174,10 @@ Cleanup is deliberately conservative. Deterministic rules run first
 `--verbose`), then a spelling pass for tool names and your `[vocabulary]`
 words, then Bol's own 350M model, trained for exactly this job because
 generic small models silently drop clauses like "don't touch login.py".
-Every step falls back to the text before it.
+Every step falls back to the text before it. The spelling pass also learns
+this session's own words as it goes, from the title of the window you are
+typing into and from your earlier pastes, so a dictated "bowl" becomes `Bol`
+in a Bol window and is left alone everywhere else.
 
 ## Troubleshooting
 
@@ -181,7 +188,7 @@ Every step falls back to the text before it.
 | Nothing happens when you speak | Keyword model not downloaded, or ear paused | `bol setup`; press the key to resume |
 | Hotkey does nothing | Input Monitoring not granted | System Settings > Privacy & Security > Input Monitoring > your terminal, restart Bol |
 | "Mic lost" in the pill | Device gone or wrong `input_device` | `bol doctor` lists devices |
-| "type" fires inside other words | Keyword spotting hears the sound | `type_phrases = ["start typing"]` |
+| A short trigger word fires inside other words | Keyword spotting hears the sound, "type" inside "prototype" too | keep `type_phrases = []` (the default) and say "hey Bol" |
 | Text pasted, Enter never pressed | By design | say "send it" |
 | Summaries sound robotic | Talk-back model still downloading | `bol setup` shows progress; `~/.config/bol/llm.log` |
 | Right Option types symbols | AltGr layout | `[hotkey] key = "cmd_r"` or `"f13"` |

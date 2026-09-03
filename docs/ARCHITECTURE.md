@@ -127,8 +127,8 @@ measured 9 to 24 ms; the chime used to be awaited before recording and cost
 window (default two minutes) rather than running forever: Bluetooth headsets
 drop to their low-quality route while any app holds the mic.
 
-**Hold to talk, say type to talk.** There are two ways to start: holding
-right Option begins recording and pastes on release, no Enter; saying "type"
+**Hold to talk, say "hey Bol" to talk.** There are two ways to start: holding
+right Option begins recording and pastes on release, no Enter; saying "hey Bol"
 begins dictation that ends after a 2 s pause, which pastes it, also without
 Enter. Endpointing uses Silero VAD (pysilero-vad, a 2.4 MB wheel with no
 dependencies, about 1 ms per 32 ms block): speech starts after two blocks
@@ -177,7 +177,7 @@ Apple Silicon, Porcupine's free tier ended in June 2026. sherpa-onnx keyword
 spotting (Apache-2.0, arm64 wheel, zipformer int8, open-vocabulary keywords
 as text) runs in `bol/wake/listener.py`, fed 32 ms frames over a pipe from
 the daemon's one microphone stream, so there is one mic owner and one
-indicator. A detection is treated like a "type" start: the ring's pre-roll
+indicator. A detection is treated like a dictation start: the ring's pre-roll
 captures the words right after the phrase, the phrase is stripped before
 the grammar, and dictation is pasted once the pause ends, without Enter.
 Measured: 2.5 percent of one core idle, detection at threshold 0.12 on two synthetic

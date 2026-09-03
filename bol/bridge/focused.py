@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 
 from .base import BridgeError
 
@@ -73,6 +74,22 @@ IDE_APPS = frozenset({
 DEFAULT_ALLOWED_APPS = sorted(TERMINAL_APPS | IDE_APPS)
 
 _KEYCODES = {"Enter": 36, "Escape": 53}
+
+# "Scratch that" has to clear the whole box, not the line the cursor is on.
+# Claude Code's own docs say Ctrl+U deletes to the start of the line and to
+# "repeat to clear across lines in multiline input", so a pasted paragraph
+# takes several presses. Four is what a dictated prompt is worth, and the
+# presses past the end are free: Ctrl+U on an empty input does nothing.
+# Cursor to the end first (Ctrl+E), because Ctrl+U only kills what is behind it.
+DISCARD_LINES = 4
+
+# Between keystrokes. System Events delivers them faster than a TUI redraws,
+# and a Ctrl+U that lands mid-redraw is a Ctrl+U the app never saw.
+DISCARD_GAP_S = 0.04
+
+# How long a title read is worth reusing. It is a spelling hint for the cleanup
+# pass, so a couple of seconds old is the same window and the same project.
+TITLE_CACHE_S = 2.0
 
 # Submit gate, title branch. "claude" has to be a whole word: the substring
 # rule used to allow a plain shell tab titled "claude-tools". A hyphenated
@@ -154,6 +171,11 @@ class FocusedBridge:
         self._allowed = allowed_apps if allowed_apps else DEFAULT_ALLOWED_APPS
         self._enter_delay = enter_delay_s
         self._anywhere = anywhere
+        # The last front window title read, for whoever wants it next: the
+        # submit gate reads it anyway, and the cleanup pass wants the project
+        # name out of it without paying for a second osascript.
+        self._title = ""
+        self._title_at = 0.0
 
     async def attach(self) -> str:
         # Nothing to pin; surface the permission need early with a probe.
@@ -197,9 +219,22 @@ class FocusedBridge:
     async def _front_window_title(self) -> str | None:
         """Best-effort front window title; None when unreadable."""
         try:
-            return await _osascript(_FRONT_TITLE_SCRIPT)
+            title = await _osascript(_FRONT_TITLE_SCRIPT)
         except BridgeError:
             return None
+        self._title, self._title_at = title, time.monotonic()
+        return title
+
+    async def front_title(self) -> str:
+        """The front window's title, for the words this session spells its way.
+
+        Cached for TITLE_CACHE_S, because the submit gate reads the same string
+        for its own reasons and a paste is one gesture. "" when it cannot be
+        read: a title is a spelling hint, and a hint may never cost a paste.
+        """
+        if self._title and time.monotonic() - self._title_at < TITLE_CACHE_S:
+            return self._title
+        return await self._front_window_title() or ""
 
     async def _process_tree(self) -> list[tuple[int, int, str]]:
         """(pid, ppid, command line) for every process, for the submit gate.
@@ -368,20 +403,32 @@ class FocusedBridge:
     async def _discard_line(self, front: str) -> None:
         """Take back what was just pasted, the way the front app understands.
 
-        Control-U kills the input line in a shell and in Claude Code's TUI. In
-        Notes or Slack it means nothing at all, so the paste would sit there
-        after the user said "scratch that". Everywhere else the paste is the
-        last edit, so one Cmd+Z takes exactly it back and leaves whatever was
-        in the field before it alone -- which Cmd+A then Delete would not.
-        An app that cannot even be named gets nothing: an undo sent into an
-        unknown window is a destructive edit on someone else's work."""
+        "Scratch that" means the box, not the line the cursor happens to be on:
+        a dictated prompt wraps, and clearing one line of it left the rest
+        sitting there. In a shell and in Claude Code's TUI that is Ctrl+E to
+        the end of the logical line and then Ctrl+U, DISCARD_LINES times,
+        because Ctrl+U kills back to the start of a line and has to be repeated
+        to cross the lines of a multiline input. The presses past the top cost
+        nothing: Ctrl+U on an empty input does nothing.
+
+        In Notes or Slack neither key means anything, so the paste would sit
+        there after the user said "scratch that". There the paste is the last
+        edit, so one Cmd+Z takes exactly it back and leaves whatever was in the
+        field before it alone -- which Cmd+A then Delete would not. An app that
+        cannot even be named gets nothing: an undo sent into an unknown window
+        is a destructive edit on someone else's work."""
         if not front:
             log.info("front app unreadable, so nothing was discarded")
             return
         if front in TERMINAL_APPS or front in IDE_APPS:
             await _osascript(
-                'tell application "System Events" to keystroke "u" using control down'
+                'tell application "System Events" to keystroke "e" using control down'
             )
+            for _ in range(DISCARD_LINES):
+                await asyncio.sleep(DISCARD_GAP_S)
+                await _osascript(
+                    'tell application "System Events" to keystroke "u" using control down'
+                )
             return
         await _osascript(
             'tell application "System Events" to keystroke "z" using command down'

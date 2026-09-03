@@ -1,7 +1,7 @@
 import pytest
 
 from bol.bridge import BridgeError, FocusedBridge, build_bridge
-from bol.bridge.focused import SubmitBlocked, frontmost_bundle_id
+from bol.bridge.focused import DISCARD_LINES, SubmitBlocked, frontmost_bundle_id
 from bol.config import Config
 
 TERMINAL = "com.apple.Terminal"
@@ -465,19 +465,33 @@ def _keystrokes(calls):
     return [s for s in _scripts(calls) if "keystroke" in s or "key code" in s]
 
 
+def _ctrl(letter: str) -> str:
+    return (
+        f'tell application "System Events" to keystroke "{letter}" '
+        "using control down"
+    )
+
+
 @pytest.mark.asyncio
-async def test_discard_in_a_terminal_is_control_u(monkeypatch):
+async def test_discard_in_a_terminal_clears_the_whole_box(monkeypatch):
+    """"Scratch that" means the box, not the line the cursor sits on.
+
+    Ctrl+E to the end of the logical line, because Ctrl+U only kills what is
+    behind the cursor, then Ctrl+U once per line of a wrapped dictation. The
+    presses past the top are free: Ctrl+U on an empty input does nothing.
+    """
     bridge, calls = _wire(monkeypatch, TERMINAL)
     await bridge.inject_keys("C-u", explicit=True)
-    assert any("using control down" in s for s in _keystrokes(calls))
+    assert _keystrokes(calls) == [_ctrl("e")] + [_ctrl("u")] * DISCARD_LINES
+    assert DISCARD_LINES == 4
     assert not any("using command down" in s for s in _keystrokes(calls))
 
 
 @pytest.mark.asyncio
-async def test_discard_in_an_ide_is_control_u(monkeypatch):
+async def test_discard_in_an_ide_clears_the_whole_box_too(monkeypatch):
     bridge, calls = _wire(monkeypatch, CURSOR)
     await bridge.inject_keys("C-u", explicit=True)
-    assert any("using control down" in s for s in _keystrokes(calls))
+    assert _keystrokes(calls) == [_ctrl("e")] + [_ctrl("u")] * DISCARD_LINES
 
 
 @pytest.mark.asyncio
@@ -502,6 +516,55 @@ async def test_interrupt_is_explicit_so_it_goes_anywhere(monkeypatch):
     bridge, calls = _wire(monkeypatch, SLACK)
     await bridge.interrupt()
     assert any("key code 53" in s for s in _keystrokes(calls))
+
+
+# --- the front window title, for the words this session spells its way -------
+
+
+def _title_bridge(monkeypatch, title, boom=False):
+    """A bridge whose only osascript is the window-title read, counted."""
+    bridge = FocusedBridge(None, 0.0)
+    reads = []
+
+    async def fake_osascript(script):
+        reads.append(script)
+        if boom:
+            raise BridgeError("not authorized")
+        return title
+
+    monkeypatch.setattr("bol.bridge.focused._osascript", fake_osascript)
+    return bridge, reads
+
+
+@pytest.mark.asyncio
+async def test_the_front_window_title_is_read_once_and_reused(monkeypatch):
+    # The submit gate reads this string for its own reasons and a paste is one
+    # gesture, so the cleanup pass must not pay for a second osascript.
+    bridge, reads = _title_bridge(monkeypatch, "Bol - claude - 180x48")
+
+    assert await bridge.front_title() == "Bol - claude - 180x48"
+    assert await bridge.front_title() == "Bol - claude - 180x48"
+
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_title_that_cannot_be_read_is_empty_not_an_error(monkeypatch):
+    # A title is a spelling hint; a hint may never cost the paste.
+    bridge, _reads = _title_bridge(monkeypatch, "", boom=True)
+
+    assert await bridge.front_title() == ""
+
+
+@pytest.mark.asyncio
+async def test_the_submit_gate_fills_the_title_cache(monkeypatch):
+    bridge, reads = _title_bridge(monkeypatch, "bol - claude")
+
+    allowed, _reason = await bridge._submit_allowed(TERMINAL)
+
+    assert allowed is True
+    assert await bridge.front_title() == "bol - claude"
+    assert len(reads) == 1  # the gate's read, reused
 
 
 # --- what the config reaches -------------------------------------------------

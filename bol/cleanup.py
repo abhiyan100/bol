@@ -4,8 +4,10 @@ Two tiers, chosen by what's trustworthy:
 
 - Deterministic (always): filler words, stutters, doubled words, spoken
   technical tokens ("auth dot py" -> "auth.py", "dash dash verbose" ->
-  "--verbose"), then spelling: the built-in tool names and whatever is in
-  [vocabulary] words. Instant, and mechanically incapable of changing meaning.
+  "--verbose"), then spelling: the built-in tool names, whatever is in
+  [vocabulary] words, and the words this session has already seen in writing
+  (the front window's title, the user's own earlier pastes). Instant, and
+  mechanically incapable of changing meaning.
 - LLM polish (api provider only): grammar and punctuation via the user's own
   big model. Local 1B-class models proved unreliable at meaning-preserving
   rewrites in testing (dropped "don't touch X" clauses, parroted few-shot
@@ -61,11 +63,13 @@ def deterministic_clean(text: str) -> str:
 
 # --------------------------------------------------------------- vocabulary
 #
-# Spelling, not rewriting. Two passes, both reversible by eye and neither of
-# them able to change a word into a different word:
+# Spelling, not rewriting. Three passes, all of them reversible by eye and none
+# of them able to change a word into a different word:
 #
 # 1. TOOL_NAMES, always on: phrases every transcriber gets wrong the same way.
 # 2. [vocabulary] words: the user's own names, matched by edit distance.
+# 3. This session's own words (below): the same names as they were written in
+#    the window title and in earlier pastes, matched by how they sound.
 #
 # Both are deliberately timid. A wrong correction costs more than a missed
 # one, because a missed one is still the word the user said. So: no bare
@@ -237,22 +241,261 @@ def _apply_words(text: str, entries: list[str]) -> str:
     return "".join(out)
 
 
-def apply_vocabulary(text: str, words=()) -> str:
+# ------------------------------------------------- the words of this session
+#
+# Three sources, one set of words, and all of them are words this session has
+# already seen in writing: the [vocabulary] list, the front window's title at
+# paste time, and the names in the user's own earlier pastes.
+#
+# The rule is looser than the edit-distance pass above, on purpose. A name the
+# transcriber has never met does not come back misspelt, it comes back as
+# whichever English word it sounds like, and "bowl" is two edits from a
+# three-character entry, which the pass above will never make. So: sounds like,
+# which is three tests and all three of them (same first letter, same consonant
+# skeleton, length within one). "bull", "ball", "bowl" and "bole" are all Bol;
+# "pull" is not.
+#
+# The common-English stoplist does not apply to these words, and that is the
+# whole point of them: in this session that word is a name. Nobody dictating
+# into a window titled "Bol" means the crockery. Two guards keep that from
+# spreading: a token inside quotes is left alone (it is being talked about, not
+# used), and so is anything wearing a dot, a slash or a dash, which is a path,
+# a flag or a file name rather than a spoken word.
+
+SESSION_WORDS_MAX = 200
+
+# Letters that carry no consonant of their own in English speech. Dropping h,
+# w and y along with the vowels is what puts "bowl" and "bole" on the same
+# skeleton as "Bol".
+_QUIET_LETTERS = frozenset("aeiouhwy")
+
+# Spellings of Bol's own name that no rule can reach: a transcriber that has
+# never seen the word writes down one it knows, and "babel" is neither the same
+# length nor the same skeleton. Only ever consulted for a word already in the
+# session's set, so a project that is not Bol never sees it.
+# Short session words get an explicit list instead of the sound-alike rule:
+# three letters own too many common words ("bill" is not Bol, "bull" is).
+OWN_SPELLINGS = {"bol": ("babel", "bull", "ball", "bowl", "bole")}
+
+# Punctuation that makes a token code rather than speech, and the quote marks
+# that make it a quotation. Frozensets, not strings: "" is a substring of every
+# string and would make the no-neighbour case look like punctuation.
+_CODE_CHARS = frozenset("./\\-_@#:")
+_QUOTED = re.compile(
+    "\"[^\"\n]*\"|`[^`\n]*`|“[^”\n]*”"
+    "|(?<![A-Za-z])'[^'\n]*'(?![A-Za-z])"
+)
+
+# What every terminal puts in every title, whatever project is in it: the
+# shell, the agent, the branch, the editor, and the pane size ("180x48").
+_TITLE_NOISE = frozenset("claude codex terminal bash zsh main visual studio code".split())
+_TITLE_SIZE = re.compile(r"\b\d+\s*x\s*\d+\b", re.IGNORECASE)
+
+_VOWELS = frozenset("aeiou")
+_PASTE_WORD = re.compile(r"\b[A-Z][A-Za-z]{2,}\b")
+_PASTE_FILE = re.compile(rf"\b[\w-]+\.(?:{_EXTS})\b", re.IGNORECASE)
+
+
+def _skeleton(word: str) -> str:
+    """A word's consonants, doubles collapsed: the shape of how it sounds."""
+    collapsed: list[str] = []
+    for char in word.lower():
+        if not collapsed or collapsed[-1] != char:
+            collapsed.append(char)
+    return "".join(char for char in collapsed if char not in _QUIET_LETTERS)
+
+
+def sounds_like(token: str, word: str) -> bool:
+    """Is this dictated token that word, said out loud?
+
+    Three tests and all three of them: the same first letter, a length within
+    one, and the same consonant skeleton. Any two of the three let a different
+    word through ("pull" shares two of them with "Bol" and is not it).
+    """
+    if not token or not word:
+        return False
+    if token.lower() == word.lower():
+        return True  # the same word, only the casing to fix
+    if len(word) < 4:
+        # Too short to trust the skeleton: a three-letter name would own
+        # every short word that starts with its letter. OWN_SPELLINGS is the
+        # way to give one of those its lookalikes, by hand.
+        return False
+    if token[0].lower() != word[0].lower():
+        return False
+    if abs(len(token) - len(word)) > 1:
+        return False
+    return _skeleton(token) == _skeleton(word)
+
+
+def _session_match(token: str, entries: list[str]) -> str | None:
+    """The session word this token is, or None. First entry wins."""
+    lowered = token.lower()
+    for entry in entries:
+        if lowered in OWN_SPELLINGS.get(entry.lower(), ()):
+            return entry
+        if sounds_like(token, entry):
+            return entry
+    return None
+
+
+def _quoted_spans(text: str) -> list[tuple[int, int]]:
+    """Where the text is quoting rather than saying. Left untouched."""
+    return [(m.start(), m.end()) for m in _QUOTED.finditer(text)]
+
+
+def _codeish(text: str, start: int, end: int) -> bool:
+    """Is this token wearing punctuation, so a path, a flag or a file name?"""
+    before = text[start - 1 : start]
+    after = text[end : end + 1]
+    if before in _CODE_CHARS or before.isdigit():
+        return True
+    if after in _CODE_CHARS or after.isdigit():
+        return True
+    # A full stop is only code with something after it ("auth.py"). Otherwise
+    # it is the end of a sentence, and the word before it is a word.
+    return after == "." and text[end + 1 : end + 2].isalnum()
+
+
+def _apply_session(text: str, entries: list[str]) -> str:
+    """Spell tokens that sound like one of this session's own words."""
+    quoted = _quoted_spans(text)
+    out: list[str] = []
+    last = 0
+    for match in _TOKEN.finditer(text):
+        start, end, token = match.start(), match.end(), match.group(0)
+        if any(open_ <= start < close for open_, close in quoted):
+            continue
+        if _codeish(text, start, end):
+            continue
+        spelling = _session_match(token, entries)
+        if spelling is None or spelling == token:
+            continue
+        out.append(text[last:start])
+        out.append(spelling)
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def title_words(title: str) -> list[str]:
+    """The project's own words in a front window title.
+
+    "Bol - claude - 180x48" is one word, Bol. A token earns its place by being
+    capitalized, or by having no vowels at all the way a tool's name is
+    written; by being three letters or more; and by not being one of the words
+    every terminal puts in every title.
+    """
+    if not isinstance(title, str) or not title.strip():
+        return []
+    out: list[str] = []
+    for match in _TOKEN.finditer(_TITLE_SIZE.sub(" ", title)):
+        token = match.group(0)
+        if len(token) < 3 or token.lower() in _TITLE_NOISE:
+            continue
+        if not token[0].isupper() and _VOWELS & set(token.lower()):
+            continue
+        if token not in out:
+            out.append(token)
+    return out
+
+
+def _opens_a_sentence(text: str, start: int) -> bool:
+    """A capital here says nothing about spelling: something ended before it."""
+    head = text[:start].rstrip()
+    return not head or head[-1] in ".!?:;"
+
+
+def paste_words(text: str) -> list[str]:
+    """The names worth keeping from something the user just dictated.
+
+    Capitalized words and file names, which is what a project's own words look
+    like in writing. A capital that only opens a sentence is punctuation, and a
+    word the language already owns is not a name.
+
+    Capitals come first, and a word already here in another case is not added
+    again: "Parakeet" written out is better evidence of how the user spells it
+    than the "parakeet" in a path.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def keep(word: str) -> None:
+        if len(word) >= 3 and word.lower() not in seen:
+            seen.add(word.lower())
+            out.append(word)
+
+    for match in _PASTE_WORD.finditer(text or ""):
+        word = match.group(0)
+        if word.lower() in _COMMON_WORDS or _opens_a_sentence(text, match.start()):
+            continue
+        keep(word)
+    for match in _PASTE_FILE.finditer(text or ""):
+        token = match.group(0)
+        keep(token)
+        keep(token.split(".", 1)[0])
+    return out
+
+
+def remember_pasted(learned: dict, text: str, limit: int = SESSION_WORDS_MAX) -> None:
+    """Keep the names in one paste. Newest last, and never more than limit.
+
+    Bounded because this grows for as long as the daemon runs, and a session
+    vocabulary is only worth the words still being used.
+    """
+    for word in paste_words(text):
+        learned.pop(word, None)
+        learned[word] = None
+    while len(learned) > limit:
+        learned.pop(next(iter(learned)))
+
+
+def session_words(*groups, limit: int = SESSION_WORDS_MAX) -> list[str]:
+    """One set of words for this session, in the order the sources are trusted.
+
+    Case comes from the source, and a word two sources spell differently is
+    kept once, the way the first of them wrote it.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group or ():
+            word = str(item).strip()
+            if not word or word.lower() in seen:
+                continue
+            seen.add(word.lower())
+            out.append(word)
+    return out[:limit]
+
+
+def _entries(words) -> list[str]:
+    words = [str(word).strip() for word in (words or ())]
+    return [word for word in words if word]
+
+
+def apply_vocabulary(text: str, words=(), session=()) -> str:
     """Spell tool names and the user's own words the way they are written.
 
     Runs after the deterministic rules and before any model, in every cleanup
     mode: it is a lookup table, so there is nothing for a model to improve
     and nothing for a timeout to lose.
+
+    words are the [vocabulary] list, matched by edit distance. session is
+    everything this session has seen in writing (that list, the window title,
+    earlier pastes), matched by how it sounds, after the edit-distance pass has
+    had its go.
     """
     if not text:
         return text
     for pattern, spelling in _TOOL_RULES:
         text = pattern.sub(lambda _m, value=spelling: value, text)
-    entries = [str(word).strip() for word in (words or ())]
-    entries = [entry for entry in entries if entry]
-    if not entries:
-        return text
-    return _apply_words(text, entries)
+    entries = _entries(words)
+    if entries:
+        text = _apply_words(text, entries)
+    entries = _entries(session)
+    if entries:
+        text = _apply_session(text, entries)
+    return text
 
 
 def _suspicious(raw: str, cleaned: str) -> bool:
@@ -336,10 +579,11 @@ async def clean_transcript(
     use_llm: bool = False,
     cleaner=None,
     vocabulary=(),
+    session=(),
 ) -> str:
     if len(text) < 8:
         return text
-    base = apply_vocabulary(deterministic_clean(text), vocabulary)
+    base = apply_vocabulary(deterministic_clean(text), vocabulary, session)
     # The tuned local model handles the polish only when there is no better
     # option; in api mode the user's own big model does it instead.
     if cleaner is not None and not use_llm:

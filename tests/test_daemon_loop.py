@@ -12,7 +12,7 @@ import pytest
 
 from bol.audio.capture import RecordingSession
 from bol import daemon as daemon_mod
-from bol.bridge.focused import SubmitBlocked
+from bol.bridge.focused import BridgeError, SubmitBlocked
 from bol.config import Config
 from bol.daemon import Daemon
 from bol.wake import CANCEL, SEND, TYPE
@@ -156,9 +156,13 @@ class Ticks:
         return self.now
 
 
-def _daemon(utterances, texts, talk_back=True, clock=None):
+def _daemon(utterances, texts, talk_back=True, clock=None, type_phrases=()):
     cfg = Config()
     cfg.ui.sounds = False
+    # The short trigger word is off by default ([wake] type_phrases = []), so
+    # "hey bol" is the one that starts a dictation. A test that wants the old
+    # split back asks for it here, before the Daemon reads the phrase table.
+    cfg.wake.type_phrases = list(type_phrases)
     # The loop tests are about the loop. Cleanup is "always" by default now,
     # and a real cleaner would load (and on a cold machine download) a 195 MB
     # model on every utterance; the cleanup tests below build their own fake.
@@ -1563,6 +1567,74 @@ async def test_cleanup_is_bounded_by_the_configured_deadline():
     assert d.cleaner.seen[0][1] == 1.25
 
 
+class TitledBridge(FakeBridge):
+    """A bridge that can say which window it is about to paste into."""
+
+    def __init__(self, title=""):
+        super().__init__()
+        self.title = title
+        self.reads = 0
+
+    async def front_title(self):
+        self.reads += 1
+        return self.title
+
+
+@pytest.mark.asyncio
+async def test_the_window_title_spells_this_sessions_own_words():
+    # The project name is in the title of the window the words are going into,
+    # so a dictated "bowl" in a Bol window is Bol.
+    d = _clean_daemon(1, ["the bowl daemon pastes it"], FakeCleaner())
+    d.bridge = TitledBridge("Bol - claude - 180x48")
+
+    await d._handle_utterance("the bowl daemon pastes it")
+
+    assert d.cleaner.seen[0][0] == "The Bol daemon pastes it"
+    assert d.bridge.injected == [("The Bol daemon pastes it ", False)]
+    assert d.bridge.reads == 1
+
+
+@pytest.mark.asyncio
+async def test_a_vocabulary_word_is_one_of_this_sessions_words_too():
+    d = _clean_daemon(1, ["the bowl daemon pastes it"], FakeCleaner())
+    d.bridge = TitledBridge("")          # no title: the config is the source
+    d.cfg.vocabulary.words = ["Bol"]
+
+    await d._handle_utterance("the bowl daemon pastes it")
+
+    assert d.cleaner.seen[0][0] == "The Bol daemon pastes it"
+
+
+@pytest.mark.asyncio
+async def test_a_paste_teaches_the_next_dictation_how_to_spell_it():
+    # Nothing in the config and nothing in the title: the only evidence is
+    # what the user themselves put in the box a moment ago.
+    d = _clean_daemon(
+        2, ["Refactor the Kokoro loader", "the kokora loader is slow"],
+        FakeCleaner(),
+    )
+    d.bridge = TitledBridge("")
+
+    await d._handle_utterance("Refactor the Kokoro loader")
+    await d._handle_utterance("the kokora loader is slow")
+
+    assert d.cleaner.seen[-1][0] == "The Kokoro loader is slow"
+
+
+@pytest.mark.asyncio
+async def test_a_bridge_that_cannot_name_its_window_still_cleans():
+    class Mute(TitledBridge):
+        async def front_title(self):
+            raise BridgeError("no Automation permission")
+
+    d = _clean_daemon(1, ["add a login test"], FakeCleaner())
+    d.bridge = Mute()
+
+    await d._handle_utterance("add a login test")
+
+    assert d.bridge.injected == [("Add a login test ", False)]
+
+
 @pytest.mark.asyncio
 async def test_a_cleanup_failure_pastes_the_words_anyway():
     # The model is missing, or it hung, or it raised. Whatever the user said
@@ -1647,12 +1719,12 @@ async def test_the_key_shows_a_listening_pill_and_plays_a_cue(cues):
 
 
 @pytest.mark.asyncio
-async def test_saying_type_shows_a_listening_pill_and_plays_a_cue(cues):
+async def test_saying_hey_bol_shows_a_listening_pill_and_plays_a_cue(cues):
     d = _daemon(1, ["add a login test"])
     d.cfg.ui.sounds = True
     d.wake = FakeWake()
 
-    d._wake_detected(0.6, "type")
+    d._wake_detected(0.6, "hey bol")
     assert d.hud.calls[0] == ("listening", "Listening", "")
 
     await asyncio.sleep(0.05)
@@ -1662,7 +1734,7 @@ async def test_saying_type_shows_a_listening_pill_and_plays_a_cue(cues):
 @pytest.mark.asyncio
 async def test_a_trigger_word_waits_speak_window_ms_and_then_hides():
     # Nothing said inside the window: the pill goes away and stays away.
-    d = _daemon(0, [])
+    d = _daemon(0, [], type_phrases=["type"])
     d.recorder = SessionRecorder(0)
     d.wake = FakeWake()
 
@@ -1740,10 +1812,13 @@ async def test_one_way_opens_no_window_after_anything():
 # ------------------------------------------------ the command window after a paste
 
 
-def _window_daemon(utterances, texts, window_s=10.0):
+def _window_daemon(utterances, texts, window_s=10.0, type_phrases=()):
     """One-way, no pill, wake ear faked: the daemon that types and then waits
     for a bare command with nothing on screen."""
-    d = _daemon(utterances, texts, talk_back=False, clock=Ticks())
+    d = _daemon(
+        utterances, texts, talk_back=False, clock=Ticks(),
+        type_phrases=type_phrases,
+    )
     d.summarizer = None
     d.wake = FakeWake()
     d.cfg.wake.command_window_s = window_s
@@ -1792,8 +1867,10 @@ async def test_a_plain_sentence_in_the_window_pastes_nothing():
 
 
 @pytest.mark.asyncio
-async def test_type_inside_the_window_starts_the_next_dictation():
-    d = _window_daemon(3, ["add a login test", "type and run pytest", "send it"])
+async def test_hey_bol_inside_the_window_starts_the_next_dictation():
+    d = _window_daemon(
+        3, ["add a login test", "hey bol and run pytest", "send it"]
+    )
     await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
     await _window_done(d)
     assert d.bridge.injected == [
@@ -1802,6 +1879,32 @@ async def test_type_inside_the_window_starts_the_next_dictation():
         ("", True),
     ]
     assert d._pending_paste is False
+
+
+@pytest.mark.asyncio
+async def test_a_misheard_hey_bol_chains_inside_the_window_too():
+    # The window hears the full recognizer, which writes down whatever it
+    # heard: "babel" is what a real dictation of "hey Bol" came back as.
+    d = _window_daemon(2, ["add a login test", "babel and run pytest"])
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    await _window_done(d)
+    assert d.bridge.injected == [
+        ("add a login test ", False),
+        ("and run pytest ", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_configured_short_word_chains_inside_the_window_as_well():
+    d = _window_daemon(
+        2, ["add a login test", "type and run pytest"], type_phrases=["type"]
+    )
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    await _window_done(d)
+    assert d.bridge.injected == [
+        ("add a login test ", False),
+        ("and run pytest ", False),
+    ]
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,27 @@
-"""The trigger words: "type", "send it", "hey Bol", and the ones that stop it.
+"""The trigger words: "hey Bol", "send it", and the ones that stop it.
 
 On by default, and here is the honest version of what that costs. Wake mode
 keeps the microphone open and runs a small keyword model on your Mac; nothing
 is recorded or sent anywhere; expect the occasional false trigger from TV or
-conversation, and "type" in particular also fires inside "what type of file"
-and "the prototype". A false trigger costs a Listening pill and a paste that
-waits; nothing reaches Claude until a send phrase presses Enter. Turn the wifi
-off and it still works.
+conversation. A false trigger costs a Listening pill and a paste that waits;
+nothing reaches Claude until a send phrase presses Enter. Turn the wifi off and
+it still works.
+
+"hey bol" is the trigger for everything. [wake] type_phrases is empty by
+default: one syllable scores far below two in a real room, and "type" also
+fires inside "what type of file" and "the prototype". Someone who wants the
+short word back sets type_phrases = ["type"] and gets exactly what it always
+did.
 
 Four kinds of trigger word, and the daemon does something different with each:
 
   WAKE   "hey bol"        a conversational recording, pasted like any other
-                          (there is a reply only with talk_back = true)
+                          (there is a reply only with talk_back = true; one-way
+                          and with no type phrase set, the daemon treats it as
+                          the dictation below, because there is nobody to
+                          converse with)
   TYPE   "type"           dictation: pasted after a pause, never submitted
+                          (off by default)
   SEND   "send it"        Enter on what is already pasted; no recording
   CANCEL "scratch that"   wipe what is already pasted; no recording
   SLEEP  "stop listening" stop hearing trigger words until the next keypress
@@ -127,10 +136,16 @@ QUEUE_FRAMES = 32
 READY_TIMEOUT_S = 20.0
 
 # Spellings of one wake phrase. A speech model that has never seen "bol"
-# spells it out of the words it does know, so all three have to be keywords
-# and all three have to come back off the front of the transcript. Anything
-# not in here is used exactly as the user wrote it.
-SPELLINGS = {"hey bol": ("hey bol", "hey bowl", "hey ball")}
+# spells it out of the words it does know, so every one of these has to be a
+# keyword and every one has to come back off the front of the transcript.
+# "babel" is one word rather than two and is in here for the same reason as the
+# rest: it is what the transcriber wrote down when the user said "hey Bol".
+# Anything not in here is used exactly as the user wrote it.
+SPELLINGS = {
+    "hey bol": (
+        "hey bol", "hey bowl", "hey ball", "hey bull", "a bol", "babel",
+    )
+}
 
 
 def spellings(phrase: str) -> tuple[str, ...]:

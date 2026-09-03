@@ -271,7 +271,11 @@ def test_a_phrase_the_model_has_no_tokens_for_is_refused(bpe):
 
 
 def test_the_default_phrase_carries_the_spellings_a_decoder_produces():
-    assert wake.spellings("hey bol") == ("hey bol", "hey bowl", "hey ball")
+    # Every one of these is something the speech model wrote down when a real
+    # person said "hey Bol", "babel" included: one word, not two.
+    assert wake.spellings("hey bol") == (
+        "hey bol", "hey bowl", "hey ball", "hey bull", "a bol", "babel",
+    )
 
 
 def test_an_unknown_phrase_is_used_exactly_as_written():
@@ -280,7 +284,9 @@ def test_an_unknown_phrase_is_used_exactly_as_written():
 
 def test_the_spellings_read_in_the_order_a_person_would_say_them():
     # This list is shown by `bol doctor`, so "hey bol" comes first.
-    assert wake.all_spellings(["hey bol"]) == ["hey bol", "hey bowl", "hey ball"]
+    assert wake.all_spellings(["hey bol"]) == [
+        "hey bol", "hey bowl", "hey ball", "hey bull", "a bol", "babel",
+    ]
 
 
 def test_a_longer_spelling_is_not_half_eaten_by_a_shorter_one():
@@ -295,6 +301,11 @@ def test_a_longer_spelling_is_not_half_eaten_by_a_shorter_one():
         ("Hey Bol what files are in this folder", "what files are in this folder"),
         ("hey bowl. run the tests", "run the tests"),
         ("HEY BALL - run the tests", "run the tests"),
+        ("hey bowl, add a test", "add a test"),
+        ("hey bull, add a test", "add a test"),
+        # One word, and the one a real dictation came back as.
+        ("babel, add a test", "add a test"),
+        ("Babel run the tests", "run the tests"),
         ("Hey, Bol, run the tests", "run the tests"),
         ("  hey bol   run the tests", "run the tests"),
         ("hey bol", ""),
@@ -626,17 +637,23 @@ class BlockingRecorder(FakeRecorder):
 
 
 def _wake_daemon(
-    utterances, texts, clock, awake_s=60.0, armed=True, commands=None
+    utterances, texts, clock, awake_s=60.0, armed=True, commands=None,
+    type_phrases=("type",), talk_back=True,
 ):
     cfg = Config()
     cfg.ui.sounds = False
+    # "type" is off by default now ([wake] type_phrases = []), and most of the
+    # tests below are about what the short trigger word does, so they turn it
+    # back on. The ones about "hey bol" doing that job pass type_phrases=[].
+    cfg.wake.type_phrases = list(type_phrases)
     # No cleanup here: these tests are about trigger words, and the "always"
     # default would put a 195 MB model in front of every assertion.
     cfg.cleanup.mode = "off"
     cfg.cleanup.model = ""
-    # Two-way, because several of these tests are about what Bol says and
-    # when it is deaf while saying it.
-    cfg.talk_back = True
+    # Two-way by default, because several of these tests are about what Bol
+    # says and when it is deaf while saying it. One-way is where "hey bol"
+    # becomes the dictation trigger, so those tests pass talk_back=False.
+    cfg.talk_back = talk_back
     cfg.wake.enabled = True
     cfg.wake.awake_s = awake_s
     # These tests count recordings; the command window that follows a paste
@@ -649,7 +666,7 @@ def _wake_daemon(
     d.recorder = TriggerRecorder(utterances, clock)
     d.transcriber = FakeTranscriber(texts)
     d.bridge = FakeBridge()
-    d.speaker = FakeSpeaker()
+    d.speaker = FakeSpeaker() if talk_back else None
     d.hud = FakeHud()
     d.wake = FakeWake(clock) if armed else None
     return d
@@ -845,9 +862,14 @@ def test_the_trigger_words_are_on_by_default():
     cfg = Config().wake
     assert cfg.enabled is True
     assert cfg.phrases == ["hey bol"]
-    assert cfg.type_phrases == ["type"]
+    # "hey bol" is the trigger for everything; the one-syllable word is off,
+    # because one syllable scores far below two in a real room.
+    assert cfg.type_phrases == []
     assert cfg.send_phrases == ["send it", "send", "enter"]
-    assert cfg.cancel_phrases == ["scratch that", "close"]
+    assert cfg.cancel_phrases == [
+        "scratch that", "close", "scratch", "clear it", "clear that",
+        "clear this", "clear the box",
+    ]
     assert cfg.sleep_phrases == ["stop listening"]
     assert cfg.threshold == 0.12
     assert cfg.type_threshold == 0.0  # 0 = use threshold
@@ -1057,7 +1079,7 @@ def test_doctor_reports_the_model_and_what_it_listens_for(monkeypatch, tmp_path)
     # What to say, not every spelling the decoder might produce: "hey bowl"
     # is in the keyword file because the model emits it, not because anyone
     # should be told to say it.
-    assert "listening for: hey bol, type, send it" in rows[2][1]
+    assert "listening for: hey bol, send it" in rows[2][1]
     assert "threshold 0.12" in rows[2][1]
     assert "2s pause pastes a dictation" in rows[2][1]
     assert rows[3][1] == cli.MIC_NOTE
@@ -1096,7 +1118,7 @@ def test_setup_says_what_the_keyword_model_costs(monkeypatch, tmp_path, capsys):
     assert "17.6 MB to download" in out
     assert fetched == [tmp_path / "models" / "kws"]
     # Setup says the same two things the doctor does.
-    assert "listening for: hey bol, type, send it" in out
+    assert "listening for: hey bol, send it" in out
     assert cli.MIC_NOTE in out
 
 
@@ -1228,12 +1250,15 @@ async def test_a_listener_that_will_not_start_is_simply_not_used():
         ("hey bol", wake.WAKE),
         ("hey bowl", wake.WAKE),
         ("hey ball", wake.WAKE),
-        ("type", wake.TYPE),
+        ("babel", wake.WAKE),
         ("send it", wake.SEND),
         ("send", wake.SEND),
         ("enter", wake.SEND),
         ("scratch that", wake.CANCEL),
         ("close", wake.CANCEL),
+        ("scratch", wake.CANCEL),
+        ("clear it", wake.CANCEL),
+        ("clear the box", wake.CANCEL),
         ("stop listening", wake.SLEEP),
     ],
 )
@@ -1243,11 +1268,27 @@ def test_every_trigger_word_maps_to_one_kind(phrase, kind):
     assert wake.keyword_map(cfg.wake, cfg.commands)[phrase] == kind
 
 
+def test_the_short_trigger_word_is_not_listened_for_until_it_is_asked_for():
+    cfg = Config()
+    assert "type" not in wake.keyword_map(cfg.wake, cfg.commands)
+
+    cfg.wake.type_phrases = ["type"]
+
+    assert wake.keyword_map(cfg.wake, cfg.commands)["type"] == wake.TYPE
+
+
 def test_the_doctor_line_names_one_phrase_per_kind():
     cfg = Config()
 
     # Not "hey bowl": that is in the keyword file because the decoder emits
-    # it, not because anyone should be told to say it.
+    # it, not because anyone should be told to say it. And no "type": there is
+    # no short trigger word until someone asks for one.
+    assert wake.lead_phrases(cfg.wake, cfg.commands) == [
+        "hey bol", "send it", "scratch that", "stop listening",
+    ]
+
+    cfg.wake.type_phrases = ["type"]
+
     assert wake.lead_phrases(cfg.wake, cfg.commands) == [
         "hey bol", "type", "send it", "scratch that", "stop listening",
     ]
@@ -1281,6 +1322,7 @@ def test_a_spelling_two_kinds_claim_belongs_to_the_first():
     # The child reports a spelling and nothing else, so a spelling that meant
     # two things would be a coin toss every time it fired.
     cfg = Config()
+    cfg.wake.type_phrases = ["type"]
     cfg.wake.cancel_phrases = ["type"]
 
     assert wake.keyword_map(cfg.wake, cfg.commands)["type"] == wake.TYPE
@@ -1297,6 +1339,7 @@ def test_blank_and_repeated_phrases_never_reach_the_keyword_file():
 
 def test_only_type_may_carry_its_own_threshold():
     cfg = Config()
+    cfg.wake.type_phrases = ["type"]
     assert "type" in wake.keyword_args(cfg.wake, cfg.commands)
 
     cfg.wake.type_threshold = 0.3
@@ -1390,6 +1433,97 @@ async def test_a_wake_keeps_the_audio_pause_and_takes_the_short_window():
     session = d.recorder.sessions[0]
     assert session.silence_ms is None  # a conversation pauses like a conversation
     assert session.window_ms == 5000   # but still gives up in seconds
+
+
+async def test_one_way_hey_bol_is_the_dictation_trigger():
+    # Nothing to converse with in one-way mode, and no short word configured,
+    # so "hey Bol" does exactly what "type" used to: the composing pause, the
+    # paste, no Enter, and a pending paste to say "send it" to.
+    clock = Clock()
+    d = _wake_daemon(
+        1, ["hey bol, add a login test"], clock, awake_s=0.0,
+        type_phrases=[], talk_back=False,
+    )
+    d.cfg.wake.pause_ms = 2000
+
+    d._wake_detected(0.6, "hey bol")
+    await asyncio.sleep(0.05)
+
+    session = d.recorder.sessions[0]
+    assert session.silence_ms == 2000                       # the composing pause
+    assert session.window_ms == d.cfg.wake.speak_window_ms
+    # The trigger word is gone from what was pasted, and nothing was sent.
+    assert d.bridge.injected == [("add a login test ", False)]
+    assert d.bridge.keys == []
+    assert d._pending_paste is True
+
+
+@pytest.mark.parametrize("spelling", ["hey bowl", "babel"])
+async def test_a_misheard_hey_bol_starts_the_same_dictation(spelling):
+    clock = Clock()
+    d = _wake_daemon(
+        1, [f"{spelling}, add a login test"], clock, awake_s=0.0,
+        type_phrases=[], talk_back=False,
+    )
+
+    d._wake_detected(0.6, spelling)
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.sessions[0].silence_ms == d.cfg.wake.pause_ms
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+async def test_a_configured_short_word_puts_hey_bol_back_to_a_conversation():
+    # type_phrases = ["type"] restores exactly the old split: "type" dictates,
+    # "hey bol" opens the microphone and pauses like a conversation.
+    clock = Clock()
+    d = _wake_daemon(
+        1, ["add a login test"], clock, awake_s=0.0,
+        type_phrases=["type"], talk_back=False,
+    )
+
+    d._wake_detected(0.6, "hey bol")
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.sessions[0].silence_ms is None
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+async def test_two_way_hey_bol_stays_a_conversation():
+    clock = Clock()
+    d = _wake_daemon(
+        1, ["add a login test"], clock, awake_s=0.0, type_phrases=[],
+    )
+
+    d._wake_detected(0.6, "hey bol")
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.sessions[0].silence_ms is None
+
+
+def test_the_startup_line_names_the_one_way_in():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, type_phrases=[], talk_back=False)
+
+    assert d._start_line() == (
+        'bol: hold alt_r, or say "hey bol", to talk. Ctrl+C to quit.'
+    )
+
+
+def test_the_startup_line_names_the_short_word_when_there_is_one():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, type_phrases=["type"], talk_back=False)
+
+    assert d._start_line() == (
+        'bol: hold alt_r, or say "hey bol" or "type", to talk. Ctrl+C to quit.'
+    )
+
+
+def test_the_startup_line_is_just_the_key_when_the_ear_is_off():
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, armed=False, talk_back=False)
+
+    assert d._start_line() == "bol: hold alt_r to talk. Ctrl+C to quit."
 
 
 async def test_a_hotkey_recording_keeps_every_configured_timing():

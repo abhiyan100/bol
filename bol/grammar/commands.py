@@ -47,9 +47,12 @@ DEFAULT_PHRASES: dict[str, list[str]] = {
         "go ahead", "submit",
     ],
     "type": ["type", "write"],
+    # Clearing the box is the command people reach for most after a bad
+    # dictation, and they say it a dozen ways. All of them mean the same thing,
+    # because guessing wrong here costs a re-dictation.
     "discard": [
-        "close", "cancel", "scratch that", "never mind", "nevermind",
-        "discard",
+        "close", "cancel", "scratch that", "scratch", "never mind", "nevermind",
+        "discard", "clear it", "clear that", "clear this", "clear the box",
     ],
     # "pause" reads better than "sleep" now that the microphone is open by
     # default: what it stops is the listening, and it comes back on a keypress.

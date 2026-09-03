@@ -1134,11 +1134,14 @@ def cmd_setup(args: argparse.Namespace) -> int:
     ok = _print_rows(rows) and ok
 
     if ok:
-        print("\nsetup done. Next: run `bol run`, then hold right Option and talk.")
+        print(
+            '\nsetup done. Next: run `bol run`, then say "hey Bol" and talk '
+            "(or hold right Option)."
+        )
     else:
         print(
             "\nsetup done, but fix the [!!] lines above first. "
-            "Then run `bol run` and hold right Option to talk."
+            'Then run `bol run` and say "hey Bol" to talk.'
         )
     return 0 if ok else 1
 

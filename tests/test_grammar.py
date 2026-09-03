@@ -44,6 +44,17 @@ def test_close_discards():
         assert parse_transcript(phrase).action is Action.DISCARD
 
 
+@pytest.mark.parametrize(
+    "said",
+    ["scratch", "clear it", "clear that", "clear this", "clear the box",
+     "Clear it.", "SCRATCH"],
+)
+def test_every_way_people_say_clear_the_box_discards(said):
+    # People say this a dozen ways after a bad dictation, and a wrong guess
+    # costs them the whole dictation again.
+    assert parse_transcript(said).action is Action.DISCARD
+
+
 def test_sleep():
     assert parse_transcript("stop listening").action is Action.SLEEP
 

@@ -1,6 +1,15 @@
 import pytest
 
-from bol.cleanup import apply_vocabulary, clean_transcript, deterministic_clean
+from bol.cleanup import (
+    SESSION_WORDS_MAX,
+    apply_vocabulary,
+    clean_transcript,
+    deterministic_clean,
+    paste_words,
+    remember_pasted,
+    session_words,
+    title_words,
+)
 
 
 class FakeEngine:
@@ -212,3 +221,159 @@ async def test_vocabulary_applies_with_no_model_at_all():
         vocabulary=[],
     )
     assert out == "Push it to GitHub please"
+
+
+# ----------------------------------------------------- this session's own words
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # The four words a transcriber that has never seen "bol" reaches for.
+        ("the bull model is fast", "the Bol model is fast"),
+        ("the ball model is fast", "the Bol model is fast"),
+        ("the bowl model is fast", "the Bol model is fast"),
+        ("the bole model is fast", "the Bol model is fast"),
+        # Capitalization, from a word that is already the right one.
+        ("bol pastes it", "Bol pastes it"),
+        # One word rather than two, and neither the same length nor the same
+        # skeleton: the product's own name earns a spelling of its own.
+        ("I was testing babel today", "I was testing Bol today"),
+        # A different first letter, or a different skeleton, and it is a
+        # different word: all three tests have to pass.
+        ("pull the branch first", "pull the branch first"),
+        ("boot the machine", "boot the machine"),
+        ("the bugle sounded", "the bugle sounded"),
+    ],
+)
+def test_a_word_that_sounds_like_this_sessions_word_is_spelled_it(raw, expected):
+    assert apply_vocabulary(raw, session=["Bol"]) == expected
+
+
+def test_a_three_letter_session_word_only_owns_its_listed_lookalikes():
+    # The sound-alike rule needs four letters to be trusted; a short name
+    # would otherwise own every short word starting with its letter. So in a
+    # Bol session "bill" stays "bill", while the listed lookalikes become Bol.
+    assert apply_vocabulary("the bill is paid", session=["Bol"]) == "the bill is paid"
+    assert apply_vocabulary("I was testing bull today", session=["Bol"]) == "I was testing Bol today"
+    assert apply_vocabulary("open bowl and run it", session=["Bol"]) == "open Bol and run it"
+    # And the [vocabulary] pass never does any of this on its own.
+    assert apply_vocabulary("the bull is paid", ["Bol"]) == "the bull is paid"
+
+
+def test_the_session_word_has_to_be_in_the_set_for_its_own_spellings():
+    # "babel" is Bol only in a session that has already seen "Bol" written
+    # down. Somebody else's project is untouched.
+    assert apply_vocabulary("run babel over it", session=["Parakeet"]) == (
+        "run babel over it"
+    )
+    assert apply_vocabulary("run babel over it") == "run babel over it"
+
+
+def test_a_session_word_overrides_the_stoplist_a_vocabulary_entry_obeys():
+    # "call" is an English word, so the [vocabulary] pass will never touch it.
+    # In a session whose own word is Cole, that word is a name.
+    assert apply_vocabulary("call the parser", ["Cole"]) == "call the parser"
+    assert apply_vocabulary("call the parser", session=["Cole"]) == "Cole the parser"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Being talked about, not being used.
+        'say "bowl" out loud',
+        "the word 'bowl' means the crockery",
+        "`bowl` is not the name",
+        # A path, a file name and a flag are already spelled the way they are.
+        "open bowl.py next",
+        "look in src/bowl/main.py",
+        "pass --bowl-first to it",
+        "rename auth.bowl to something else",
+    ],
+)
+def test_a_quoted_or_code_token_is_left_alone(raw):
+    assert apply_vocabulary(raw, session=["Bol"]) == raw
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        # The project is the capitalized word; the shell, the agent and the
+        # pane size are in every title whatever the project is.
+        ("Bol - claude - 180x48", ["Bol"]),
+        ("auth.py - Bol - Visual Studio Code", ["Bol"]),
+        ("zsh - Bol - 120x40", ["Bol"]),
+        ("bol - claude - main", []),          # lower case says nothing
+        ("Bol - Parakeet - claude", ["Bol", "Parakeet"]),
+        # No vowels, the way a tool's name is written.
+        ("nvm - Bol", ["nvm", "Bol"]),
+        ("", []),
+        (None, []),
+    ],
+)
+def test_the_front_window_title_gives_up_the_project_name(title, expected):
+    assert title_words(title) == expected
+
+
+def test_a_paste_teaches_the_names_in_it():
+    assert paste_words("Refactor the Parakeet loader in stt/parakeet.py") == [
+        # The capital comes first: written out is better evidence of how the
+        # user spells it than the same word inside a path.
+        "Parakeet",
+        "parakeet.py",
+    ]
+    # A capital that only opens a sentence is punctuation, and a word the
+    # language already owns is not a name.
+    assert paste_words("Fix the login test. Then run it.") == []
+
+
+def _name(index: int) -> str:
+    """A distinct capitalized name per index, with no digits in it: a digit
+    beside a word is how the pass recognises code."""
+    return f"Zulu{chr(65 + index // 26)}{chr(97 + index % 26)}"
+
+
+def test_learning_from_pastes_is_bounded_and_keeps_the_newest():
+    learned: dict = {}
+    for index in range(SESSION_WORDS_MAX + 5):
+        remember_pasted(learned, f"ask {_name(index)} about it")
+
+    assert len(learned) == SESSION_WORDS_MAX
+    assert _name(0) not in learned                       # the oldest went
+    assert _name(SESSION_WORDS_MAX + 4) in learned
+
+
+def test_a_word_learned_from_a_paste_spells_the_next_dictation():
+    learned: dict = {}
+    remember_pasted(learned, "Refactor the Kokoro loader")
+    words = session_words([], title_words("Bol - claude"), learned)
+
+    assert words == ["Bol", "Kokoro"]
+    assert apply_vocabulary("the kokora loader is slow", session=words) == (
+        "the Kokoro loader is slow"
+    )
+
+
+def test_one_set_of_words_from_three_sources():
+    # In the order they are trusted, spelled the way the first source wrote
+    # it, and every word once.
+    words = session_words(
+        ["Kokoro"], title_words("Bol - claude"), {"kokoro": None, "auth.py": None}
+    )
+    assert words == ["Kokoro", "Bol", "auth.py"]
+
+
+@pytest.mark.asyncio
+async def test_clean_transcript_takes_the_session_words_too():
+    cleaner = FakeCleaner()
+    out = await clean_transcript(
+        FakeEngine(error=True),
+        "um the bowl daemon pastes it",
+        2.0,
+        use_llm=False,
+        cleaner=cleaner,
+        session=["Bol"],
+    )
+    # Spelled before the model sees it, so there is nothing for it to undo.
+    assert cleaner.calls == ["The Bol daemon pastes it"]
+    assert out == "The Bol daemon pastes it [tuned]"

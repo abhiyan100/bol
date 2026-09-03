@@ -84,23 +84,28 @@ class WakeConfig:
     # to switch on is one most people never switch on. false turns the
     # always-on microphone off and leaves the hotkey exactly as it was.
     enabled: bool = True
-    # Start a conversation: a recording that ends when you stop talking, and
-    # is pasted like any other. There is a reply only with talk_back = true;
-    # one-way, this is a second way to start dictating. Bol matches the
-    # spellings a speech model actually produces for each phrase
-    # (for "hey bol": "hey bowl" and "hey ball" too).
+    # The trigger for everything. A recording that ends when you stop talking
+    # and is pasted where the cursor is; with talk_back = true it is the
+    # conversation flow, and one-way (the default) it is the dictation flow
+    # "type" used to start, endpointed on pause_ms. Bol matches the spellings a
+    # speech model actually produces for each phrase (for "hey bol": "hey
+    # bowl", "hey ball", "hey bull", "a bol" and "babel" too).
     phrases: list = field(default_factory=lambda: ["hey bol"])
-    # Start dictation: everything said until you pause for pause_ms is pasted
-    # where the cursor is, and nothing is submitted until you say a send
-    # phrase. One word, so it also fires inside "what type of file" and "the
-    # prototype": see type_threshold for what that costs and what it does not.
-    type_phrases: list = field(default_factory=lambda: ["type"])
+    # A short trigger word that starts dictation, off by default: one syllable
+    # scores far below "hey bol" in a real room; ["type"] to turn it on.
+    type_phrases: list = field(default_factory=list)
     # Press Enter on text Bol has already pasted. Nothing pasted, nothing
     # happens. Left at this default, a [commands] send list wins instead, so
     # remapping "send it" to "ship it" remaps the trigger word too.
     send_phrases: list = field(default_factory=lambda: ["send it", "send", "enter"])
-    # Wipe the input line, when there is a pending paste to wipe.
-    cancel_phrases: list = field(default_factory=lambda: ["scratch that", "close"])
+    # Wipe the whole input box, when there is a pending paste to wipe. Said a
+    # dozen ways, because a wrong guess here costs the dictation again.
+    cancel_phrases: list = field(
+        default_factory=lambda: [
+            "scratch that", "close", "scratch", "clear it", "clear that",
+            "clear this", "clear the box",
+        ]
+    )
     # Stop listening for trigger words until the next hotkey press. Same rule
     # as send_phrases: a [commands] sleep list wins over this default.
     sleep_phrases: list = field(default_factory=lambda: ["stop listening"])
@@ -109,7 +114,7 @@ class WakeConfig:
     # of speech full of "ball", "bowl", "close" and "send" false-fires on none
     # of them except "type".
     threshold: float = 0.12
-    # "type" only, and 0 means "use threshold". Measured: raising this does
+    # type_phrases only, and 0 means "use threshold". Measured: raising this does
     # not buy precision. At 0.30 the real "type add a login test" stops
     # firing for one of the two test voices while all eight false positives
     # inside "prototype"/"what type of file" survive, because a keyword
@@ -117,9 +122,9 @@ class WakeConfig:
     # sentence. If false dictation bothers you, change type_phrases to
     # something longer ("bol type", "dictate") rather than raising this.
     type_threshold: float = 0.0
-    # How long a pause ends a "type" dictation and pastes it. Longer than the
-    # [audio] silence_ms the conversation flow uses: dictating a prompt has
-    # thinking pauses in it. Two seconds, and the paste is instant after them.
+    # How long a pause ends a dictation and pastes it. Longer than the [audio]
+    # silence_ms the conversation flow uses: dictating a prompt has thinking
+    # pauses in it. Two seconds, and the paste is instant after them.
     pause_ms: int = 2000
     # How long the pill waits for you to start speaking after a trigger word
     # (or after Bol asked you something). Nothing said in that window and the
@@ -441,9 +446,9 @@ key = "alt_r"          # right Option. Hold it, talk, let go, and what you said 
 
 [wake]
 # The trigger words, listened for from the moment Bol starts, so there is no
-# key to press. Say "type" and talk; pause two seconds and it is pasted.
-# Say "send it" and it is sent. Say "hey Bol" for the conversation flow,
-# which needs talk_back = true above to have anyone to talk to.
+# key to press. Say "hey Bol" and talk; pause two seconds and it is pasted.
+# Say "send it" and it is sent. With talk_back = true above, "hey Bol" is the
+# conversation flow instead, and there is someone to talk to.
 # Here is what leaving this on actually does.
 #   Wake mode keeps the microphone open and runs a small keyword model on
 #   your Mac. Nothing is recorded or sent anywhere. Expect the occasional
@@ -453,19 +458,21 @@ key = "alt_r"          # right Option. Hold it, talk, let go, and what you said 
 # 5 MB keyword model. Set enabled = false to close the microphone and keep
 # the hotkey, which works the same either way.
 enabled = true
-phrases = ["hey bol"]              # Bol also listens for "hey bowl" and "hey ball"
-type_phrases = ["type"]            # starts dictation; pause pause_ms and it is pasted
+phrases = ["hey bol"]              # also heard as "hey bowl", "hey ball", "babel"
+type_phrases = []      # a short trigger word that starts dictation, off by default:
+                       # one syllable scores far below "hey bol" in a real room;
+                       # ["type"] to turn it on
 send_phrases = ["send it", "send", "enter"]  # presses Enter on a pending paste
-cancel_phrases = ["scratch that", "close"]   # wipes a pending paste
+cancel_phrases = ["scratch that", "close", "scratch", "clear it", "clear that", "clear this", "clear the box"]  # wipes the box
 sleep_phrases = ["stop listening"] # pause Bol; press the hotkey to resume
-pause_ms = 2000        # a pause this long ends a "type" dictation and pastes it
+pause_ms = 2000        # a pause this long ends a dictation and pastes it
 speak_window_ms = 5000 # how long the pill waits for you to start speaking after a
 command_window_s = 10  # after a paste, seconds Bol listens for "send it" or "scratch that", nothing on screen; 0 = keyword ear only
                        # trigger word before it gives up and goes away again
 threshold = 0.12       # trigger probability; lower hears more, including the TV
-# type_threshold = 0.0 # "type" only; 0 = use threshold. Raising it costs the real
-#                      # "type ..." before it costs the one inside "prototype", so
-#                      # if false dictation bothers you, change type_phrases instead.
+# type_threshold = 0.0 # type_phrases only; 0 = use threshold. Raising it costs the
+#                      # real "type ..." before it costs the one inside "prototype",
+#                      # so if false dictation bothers you, change type_phrases instead.
 awake_s = 0            # after a trigger word or a hold, how long follow-up speech needs
                        # no trigger. 0 = only trigger words and the key ever start
                        # listening (default; room noise cannot wake the pill).
@@ -514,6 +521,9 @@ model = "abhiyan10/bol-cleanup-350m-4bit"  # Bol's own 195MB model; "" = rules o
 # transcriber has never met. A dictated word within one edit of an entry is
 # replaced with the entry, exactly as written. Common English words are left
 # alone. Bol always knows the usual tool names (Claude Code, GitHub, uv).
+# Bol also learns this session's own words as it goes, from the front window's
+# title and from your earlier pastes, and spells a word that sounds like one of
+# them ("bowl" in a window titled Bol) that way.
 words = []             # e.g. ["Abhiyan", "Poudel", "Parakeet", "Kokoro"]
 
 [summarizer]

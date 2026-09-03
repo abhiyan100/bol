@@ -11,12 +11,13 @@ user saying so, either as a send phrase ("send it", in the recording or as a
 trigger word) or as the answer to a permission prompt.
 
 There is also no key at all, by default. The keyword listener is up from the
-moment Bol starts, and four trigger words drive the whole loop without one:
-"type" starts dictation that is pasted after a two second pause, "send it"
-presses Enter on what is already pasted, "scratch that" wipes it, and
-"hey Bol" starts the conversation flow. "Stop listening" mutes the trigger
-words until the next keypress. See bol/wake for what that costs and how it is
-kept off the daemon's own process.
+moment Bol starts, and the trigger words drive the whole loop without one:
+"hey Bol" starts a dictation that is pasted after a two second pause (or, with
+talk_back, the conversation flow), "send it" presses Enter on what is already
+pasted, "scratch that" wipes the box, and "stop listening" mutes the trigger
+words until the next keypress. A short trigger word for dictation is available
+and off by default ([wake] type_phrases). See bol/wake for what that costs and
+how it is kept off the daemon's own process.
 
 Three things, and only three, put the pill on screen: a trigger word, the
 hotkey, and a question Bol asked out loud. Speech alone never does. The awake
@@ -47,7 +48,14 @@ from .audio import Recorder
 from .audio.capture import CANCELLED
 from .bridge import BridgeError, build_bridge, frontmost_bundle_id
 from .bridge.focused import SubmitBlocked
-from .cleanup import CLEANUP_SYSTEM, build_cleaner, clean_transcript
+from .cleanup import (
+    CLEANUP_SYSTEM,
+    build_cleaner,
+    clean_transcript,
+    remember_pasted,
+    session_words,
+    title_words,
+)
 from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker, display_name
@@ -65,7 +73,6 @@ from .wake import (
     WAKE,
     WakeListener,
     keyword_map,
-    lead_phrases,
     strip_wake_phrase,
     trigger_phrases,
 )
@@ -232,15 +239,25 @@ class Daemon:
         # the listener starts so the daemon can answer "what does this phrase
         # mean" whether or not a child process ever came up.
         self._wake_kinds = keyword_map(cfg.wake, cfg.commands)
-        # Every spelling that has to come back off the front of a transcript a
-        # "type" started: the trigger word is not part of what was dictated.
-        self._type_phrases = list(cfg.wake.phrases or ()) + trigger_phrases(
-            cfg.wake, cfg.commands
-        ).get(TYPE, [])
+        _triggers = trigger_phrases(cfg.wake, cfg.commands)
+        # Every spelling that has to come back off the front of a dictation:
+        # the trigger word that started it is not part of what was dictated,
+        # whether that was "hey bol" or a configured short word.
+        self._type_phrases = list(cfg.wake.phrases or ()) + _triggers.get(TYPE, [])
+        # With no short trigger word configured (the default), "hey bol" is the
+        # only way in, so one-way it has to be the dictation flow "type" used
+        # to be: pause_ms endpointing, pasted, never submitted. Two-way it
+        # stays the conversation, because there someone answers.
+        self._wake_dictates = not self.talk_back and not _triggers.get(TYPE)
         # Text Bol pasted and did not submit. A send phrase presses Enter on
         # it; without one there is nothing to send, and "send it" said at the
         # television must not press Enter on whatever the user typed by hand.
         self._pending_paste = False
+        # Words this session has already put in writing, learned from the
+        # user's own pastes: how this project spells its own names. Bounded,
+        # and merged with [vocabulary] and the window title for the cleanup
+        # pass. Insertion-ordered, so the oldest name is the one dropped.
+        self._learned: dict[str, None] = {}
         # The command window: after a paste, one invisible listen for a bare
         # "send it" or "scratch that", so the keyword ear is not the only way
         # to finish a dictation. Yielded to any trigger word or key press.
@@ -345,9 +362,7 @@ class Daemon:
             mouse = MouseListener(self._clicked)
             if mouse.start():
                 self.mouse = mouse
-        key = self.cfg.hotkey.key
-        phrase = self._wake_phrase()
-        print(f"bol: hold {key}{phrase} to talk. Ctrl+C to quit.")
+        print(self._start_line())
         try:
             await asyncio.Event().wait()
         finally:
@@ -463,11 +478,24 @@ class Daemon:
         await self.recorder.monitor(None)
         await listener.stop()
 
+    def _start_line(self) -> str:
+        """The one line that says how to start talking."""
+        return (
+            f"bol: hold {self.cfg.hotkey.key}{self._wake_phrase()} "
+            "to talk. Ctrl+C to quit."
+        )
+
     def _wake_phrase(self) -> str:
-        """What to add to the startup line when the trigger words are armed."""
+        """What to add to the startup line when the trigger words are armed.
+
+        Only the phrases that start something: "hey bol", and the short word
+        too when someone configured one. "send it" and "scratch that" act on a
+        paste, and at startup there is nothing pasted for them to act on.
+        """
         if self.wake is None:
             return ""
-        said = lead_phrases(self.cfg.wake, self.cfg.commands)[:2]
+        phrases = trigger_phrases(self.cfg.wake, self.cfg.commands)
+        said = [phrases[kind][0] for kind in (WAKE, TYPE) if phrases.get(kind)]
         if not said:
             return ""
         return ", or say " + " or ".join(f'"{phrase}"' for phrase in said) + ","
@@ -478,14 +506,18 @@ class Daemon:
         "send it" and "scratch that" act on text that is already in Claude's
         box, so they start no recording at all: there is nothing left to say.
         "stop listening" stops the trigger words until the next keypress.
-        "type" and "hey bol" both open the microphone; a type is dictation,
-        with the longer pause of someone composing a prompt. Both are ignored
-        while a recording is already running, because that recording is the
-        answer to whatever is being said now.
+        "hey bol" (and "type", where one is configured) opens the microphone; a
+        dictation gets the longer pause of someone composing a prompt. Both are
+        ignored while a recording is already running, because that recording is
+        the answer to whatever is being said now.
         """
         if self.wake is None or self._asleep:
             return
         kind = self._wake_kinds.get(phrase, WAKE)
+        if kind == WAKE and self._wake_dictates:
+            # One-way, and no short trigger word configured: "hey bol" is how
+            # you start dictating, so it gets the dictation's timings.
+            kind = TYPE
         if kind in (SEND, CANCEL, SLEEP):
             self._wake_command(kind, phrase)
             return
@@ -545,7 +577,7 @@ class Daemon:
         a two-word phrase cold, in a real room, at a threshold tuned on
         synthetic voices. It missed. So after a paste the full recognizer
         listens too, invisibly: a bare "send it" or "scratch that" is acted
-        on, "type ..." starts the next dictation, anything else is ignored
+        on, "hey bol ..." starts the next dictation, anything else is ignored
         and never pasted. Whichever path hears the command first wins; the
         pending flag makes sure Enter is pressed once.
         """
@@ -1080,6 +1112,35 @@ class Daemon:
     async def _keys(self, *keys: str, explicit: bool = False) -> None:
         await self.bridge.inject_keys(*keys, explicit=explicit)
 
+    async def _session_words(self) -> list[str]:
+        """Every word this session has seen in writing, for the cleanup pass.
+
+        Three sources, in the order they are trusted: the [vocabulary] list the
+        user wrote down, the project name in the title of the window about to
+        receive the paste, and the names in their own earlier pastes.
+        """
+        return session_words(
+            self.cfg.vocabulary.words,
+            title_words(await self._front_title()),
+            self._learned,
+        )
+
+    async def _front_title(self) -> str:
+        """The front window's title, or "" when there is no reading it.
+
+        The bridge reads it for the submit gate already, so this is usually
+        that same string. Never raises and never blocks the paste: a title is a
+        spelling hint, and a spelling hint may not cost the dictation.
+        """
+        read = getattr(self.bridge, "front_title", None)
+        if read is None:
+            return ""
+        try:
+            return await read() or ""
+        except Exception as exc:  # noqa: BLE001 - a hint, never the paste
+            log.debug("front window title unreadable (%s)", exc)
+            return ""
+
     async def _handle_utterance(self, text: str) -> bool:
         """Act on one utterance. Returns True if the mic may reopen (the awake
         window decides), False if the turn passed to Claude or the loop should
@@ -1161,10 +1222,16 @@ class Daemon:
                 use_llm=self.engine is not None and self.cfg.llm.provider == "api",
                 cleaner=self.cleaner,
                 vocabulary=self.cfg.vocabulary.words,
+                session=await self._session_words(),
             )
             if cleaned != text:
                 print(f"bol: cleaned -> {cleaned}")
                 text = cleaned
+        if text and action in (Action.DICTATE, Action.TYPE, Action.SEND):
+            # What the user just put in the box is how this session spells its
+            # own names, so the next dictation of one gets it right. Learned
+            # from the text going in, not from anything Bol decided.
+            remember_pasted(self._learned, text)
         if action in (Action.DICTATE, Action.TYPE):
             # A bare "clean it up" parses as DICTATE with no text; injecting
             # a lone space would litter Claude's input box.
