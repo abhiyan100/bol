@@ -5,26 +5,29 @@ hold the key / a trigger word → record → transcribe → parse command → pa
         pill (and, with talk_back, a spoken summary) ← Stop hook ← Claude
 
 Dictated text is pasted where the cursor is as soon as the recording ends, so
-the user watches it appear exactly like typing. Nothing is ever submitted by
-itself: every Enter is the user saying so, either as a send phrase ("send it",
-in the recording or as a trigger word) or as the answer to a permission
-prompt. A paste therefore always leaves a pending paste behind, and the pill
-says how to send it.
+the user watches it appear exactly like typing, and the pill goes away the
+moment the words land. Nothing is ever submitted by itself: every Enter is the
+user saying so, either as a send phrase ("send it", in the recording or as a
+trigger word) or as the answer to a permission prompt.
 
 There is also no key at all, by default. The keyword listener is up from the
 moment Bol starts, and four trigger words drive the whole loop without one:
-"type" starts dictation that is pasted after a three second pause, "send it"
+"type" starts dictation that is pasted after a two second pause, "send it"
 presses Enter on what is already pasted, "scratch that" wipes it, and
 "hey Bol" starts the conversation flow. "Stop listening" mutes the trigger
-words until the next keypress. For awake_s after anything said, the next
-sentence needs no trigger word at all, and awake_s = 0 is the setting for
-people who want only trigger words to ever start anything. See bol/wake for
-what that costs and how it is kept off the daemon's own process.
+words until the next keypress. See bol/wake for what that costs and how it is
+kept off the daemon's own process.
 
-talk_back decides whether anything comes back out loud. Off (the default) Bol
-is one-way: no speaker, no summarizer, no LLM server, and the Stop hook is
-still what draws the pill. On, the reply is spoken and "hey Bol" has someone
-to talk to.
+Three things, and only three, put the pill on screen: a trigger word, the
+hotkey, and a question Bol asked out loud. Speech alone never does. The awake
+window ([wake] awake_s) is off by default for exactly that reason: with it
+open, room noise kept reopening the microphone and the pill kept coming back.
+
+talk_back decides whether anything comes back out loud, and it decides more
+than that. Off (the default) Bol is pure dictation: no speaker, no summarizer,
+no LLM server, no hook server, no hooks, and nothing on screen or in the
+terminal about a coding agent at all. On, the reply is spoken, the agent's
+hooks drive the pill, and "hey Bol" has someone to talk to.
 
 While the user is still talking the pill shows the words as they are decoded.
 That path is display only and stops at the pill: the text that reaches Claude
@@ -97,15 +100,15 @@ CHAIN, QUIET, STOP = "chain", "quiet", "stop"
 # pipe to another process.
 LIVE_PILL_HZ = 4.0
 
-# What the pill says after every paste, and how long it stays. Long enough to
-# read a sentence, short enough that it is gone before the next thing said.
-# One line for every paste there is, because there is only one kind now: the
-# words are in the box and an Enter is one phrase away.
-PASTE_HINT = "Pasted. Say send it to send"
-PASTE_HINT_S = 2.5
+# A pill line the user is meant to read rather than a receipt, and how long it
+# stays: long enough for a sentence, short enough to be gone before the next
+# thing said. A paste no longer gets one. The words appearing in the box is
+# the whole message, and a blue capsule sitting there afterwards was the thing
+# people asked us to take away.
+HINT_S = 2.5
 
-# And for the pause, which is the one state with no way out except the key.
-# Saying so is the difference between a paused Bol and a broken one.
+# The pause is the one state with no way out except the key. Saying so is the
+# difference between a paused Bol and a broken one.
 SLEEP_HINT = "Paused. Press the key to resume"
 
 # How often a recording a trigger word started checks that the user is still
@@ -187,11 +190,19 @@ class Daemon:
         self.bridge = build_bridge(cfg)
         self.grammar = Grammar(cfg.commands)
         self.tracker = TurnTracker()
-        self.server = HookServer(
-            cfg.server.host,
-            cfg.server.port,
-            hook_token(),
-            allow_remote=cfg.server.allow_remote,
+        # The hook server exists only to hear from a coding agent, and in
+        # one-way mode Bol has nothing to say about one. Not started, not
+        # bound, not even constructed: no port, no token file, no /health,
+        # and no way for a hook to put an agent's name on the pill.
+        self.server = (
+            HookServer(
+                cfg.server.host,
+                cfg.server.port,
+                hook_token(),
+                allow_remote=cfg.server.allow_remote,
+            )
+            if self.talk_back
+            else None
         )
         self.speaker = build_speaker(cfg) if self.talk_back else None
         self.engine = LLMEngine(cfg) if self.talk_back else None
@@ -207,6 +218,9 @@ class Daemon:
         # The recording a trigger word started, while it is running: the one
         # a click or an app switch is allowed to cancel.
         self._wake_session = None
+        # Why it was cancelled, so the loop can print one line about it
+        # instead of a log line and then a second, vaguer print.
+        self._cancel_reason = ""
         # Wake mode, when [wake] enabled = true and the extra is installed.
         # None the rest of the time, and every wake path checks for it.
         self.wake: WakeListener | None = None
@@ -264,13 +278,15 @@ class Daemon:
         target = await self.bridge.attach()
         print(f"bol: injecting into {target}")
 
-        self.server.on("Stop", self._on_stop)
-        self.server.on("PostToolUse", self._on_tool)
-        self.server.on("Notification", self._on_notification)
-        # Codex's stand-in for Notification. One endpoint, one daemon: both
-        # agents can be wired at once and the payload says which spoke.
-        self.server.on("PermissionRequest", self._on_permission_request)
-        await self.server.start()
+        if self.server is not None:
+            self.server.on("Stop", self._on_stop)
+            self.server.on("PostToolUse", self._on_tool)
+            self.server.on("Notification", self._on_notification)
+            # Codex's stand-in for Notification. One endpoint, one daemon:
+            # both agents can be wired at once and the payload says which
+            # spoke.
+            self.server.on("PermissionRequest", self._on_permission_request)
+            await self.server.start()
         loop = asyncio.get_running_loop()
         # Two-way only, and in the background; template/raw fallbacks cover
         # the gap (and the first run's model download).
@@ -282,7 +298,11 @@ class Daemon:
         warmup = getattr(self.cleaner, "warmup", None)
         if callable(warmup):
             loop.create_task(warmup()).add_done_callback(_drain)
-        print(f"bol: hook server on http://{self.cfg.server.host}:{self.cfg.server.port}/hook")
+        if self.server is not None:
+            print(
+                "bol: hook server on "
+                f"http://{self.cfg.server.host}:{self.cfg.server.port}/hook"
+            )
         print(self.mode_line())
 
         if self.transcriber is not None and not self.text_mode:
@@ -330,7 +350,8 @@ class Daemon:
             await self._stop_wake()
             await self.hud.stop()
             await self.recorder.close()
-            await self.server.stop()
+            if self.server is not None:
+                await self.server.stop()
             if self.engine is not None:
                 await self.engine.stop()
 
@@ -342,7 +363,7 @@ class Daemon:
     def _bind_agent(self, agent: str) -> None:
         """Remember which agent this event came from, for the words Bol uses."""
         if agent and agent != self._agent:
-            log.info("narrating %s", display_name(agent))
+            log.debug("narrating %s", display_name(agent))
             self._agent = agent
 
     def mode_line(self) -> str:
@@ -389,7 +410,7 @@ class Daemon:
             self.hud.set("error", f"Mic lost: {name}")
         if not self.cfg.audio.input_device.strip():
             return  # already the default device; there is nothing to fall back to
-        log.info("retrying with the system default input device")
+        log.debug("retrying with the system default input device")
         self.recorder.use_default_device()
         try:
             await self.recorder.open()
@@ -465,7 +486,10 @@ class Daemon:
             return
         if self._listen_lock.locked() or self._pending_listen:
             return
-        log.info("heard %r (%.2f)", phrase or "a trigger word", score)
+        # Debug, not info: a trigger word is a thing the user just said, and
+        # narrating it back at them fills the terminal with lines nobody asked
+        # for. "you: ..." is the line that says Bol heard them.
+        log.debug("heard %r (%.2f)", phrase or "a trigger word", score)
         self.hud.set("listening", "Listening")
         self._touch_awake()
         self._prewarm()
@@ -492,11 +516,13 @@ class Daemon:
         start, because the user's hand on the key is already the statement
         that they mean to say something; a microphone that opened itself on a
         word heard across the room has to give up much sooner than that, and
-        pause_ms is the number the user already picked for "a pause".
+        speak_window_ms is the number the user picked for exactly that.
+        pause_ms is the other end: how long a pause in a dictation lasts
+        before the words are pasted.
         """
         session = self.recorder.begin()
         if trigger:
-            session.window_ms = int(self.cfg.wake.pause_ms)
+            session.window_ms = int(self.cfg.wake.speak_window_ms)
         if trigger == TYPE:
             session.silence_ms = int(self.cfg.wake.pause_ms)
         return session
@@ -504,7 +530,7 @@ class Daemon:
     def _wake_command(self, kind: str, phrase: str = "") -> None:
         """A trigger word that acts on text rather than starting a recording."""
         if kind == SLEEP:
-            log.info("heard %r, pausing", phrase or kind)
+            log.debug("heard %r, pausing", phrase or kind)
             self._go_to_sleep()
             return
         if not self._pending_paste:
@@ -524,9 +550,11 @@ class Daemon:
                 # wherever they are looking, Notes and Slack included.
                 await self._keys("Enter", explicit=True)
                 self._pending_paste = False
-                self.hud.set("sending", "Sent")
+                # Nothing on screen: the text left the box, which the user can
+                # see. The chime is the whole receipt.
+                self._idle_pill()
                 self._cue("done")
-                print(f"bol: sent. {self.agent_name}'s turn.")
+                print("bol: sent.")
             else:
                 await self._keys("C-u", explicit=True)
                 self._pending_paste = False
@@ -536,7 +564,7 @@ class Daemon:
         except SubmitBlocked as exc:
             # The paste is still there and still unsent, so the flag stays up
             # and saying it again once the agent is in front will work.
-            log.info("submit withheld: %s", exc)
+            log.debug("submit withheld: %s", exc)
             await self._speak(
                 f"That window doesn't look like {self.agent_name}, "
                 "so I didn't press Enter."
@@ -559,7 +587,7 @@ class Daemon:
         # Or the next pause would reopen the mic Bol was just told to leave.
         self._awake_until = 0.0
         self._mute_wake()
-        self.hud.set("sending", SLEEP_HINT, hold=PASTE_HINT_S)
+        self.hud.set("sending", SLEEP_HINT, hold=HINT_S)
         print("bol: paused. Press the key to resume.")
 
     # ------------------------------------------------------------ cancelling
@@ -572,14 +600,21 @@ class Daemon:
         dictating (to put the cursor somewhere, to bring a window forward) is
         a thing people do on purpose.
         """
-        self._cancel_wake_recording("a click")
+        self._cancel_wake_recording("click")
 
-    def _cancel_wake_recording(self, why: str) -> None:
+    def _cancel_wake_recording(self, why: str, detail: str = "") -> None:
+        """Stop a recording nobody asked for, and remember the short reason.
+
+        The reason is kept rather than logged: the capture loop prints exactly
+        one line about a cancelled recording, and two lines saying the same
+        thing in different words is what this used to be.
+        """
         session = self._wake_session
         if session is None:
             return
         self._wake_session = None
-        log.info("recording cancelled: %s", why)
+        self._cancel_reason = why
+        log.debug("recording cancelled: %s", detail or why)
         session.request_stop(CANCELLED)
 
     async def _watch_frontmost(self, session) -> None:
@@ -605,7 +640,9 @@ class Daemon:
                     was = now or was
                     continue
                 if now != was:
-                    self._cancel_wake_recording(f"{was} gave way to {now}")
+                    self._cancel_wake_recording(
+                        "you switched apps", f"{was} gave way to {now}"
+                    )
                     return
         except asyncio.CancelledError:
             raise
@@ -622,8 +659,14 @@ class Daemon:
         return self.wake is not None and self._clock() < self._awake_until
 
     def _idle_pill(self) -> None:
-        """Clear the pill, or leave the awake dot up if the window is open."""
-        self.hud.set("awake" if self._awake() else "idle")
+        """Take the pill off the screen.
+
+        There is no "awake" pill any more. It stood for the window in which
+        speech needs no trigger word, and a capsule that sits there between
+        sentences is one nobody stops seeing; with awake_s off by default it
+        would also have been lying most of the time.
+        """
+        self.hud.set("idle")
 
     def _mute_wake(self) -> None:
         if self.wake is not None:
@@ -704,8 +747,31 @@ class Daemon:
         task = asyncio.get_running_loop().create_task(play_cue(name))
         task.add_done_callback(_drain)
 
+    async def _follow_up_listen(self, question: str = "") -> None:
+        """Open the microphone once, after Bol has spoken. Two-way only.
+
+        Bol just read a summary or asked a question, so the next thing said is
+        the answer and should not need a trigger word. Exactly one window of
+        speak_window_ms, and then the microphone closes whatever happened:
+        the rolling awake window is what had the pill coming back again and
+        again while nobody was talking.
+        """
+        if not self.talk_back or self.text_mode or self.transcriber is None:
+            return
+        if self._asleep or self._listen_lock.locked() or self._pending_listen:
+            return
+        self.hud.set("listening", "Listening")
+        session = self._begin(WAKE)
+        await self._listen_session(
+            session, until_silence=True, trigger=WAKE, once=True
+        )
+        # Nobody answered, and the question is still waiting: put it back on
+        # screen rather than leaving an unanswered prompt with a blank pill.
+        if question and self._permission_session:
+            self.hud.set("permission", question)
+
     async def _listen_session(
-        self, session, until_silence: bool, trigger: str = ""
+        self, session, until_silence: bool, trigger: str = "", once: bool = False
     ) -> None:
         """Own the mic for one recording, then keep it open while the awake
         window lasts (the reopen loop: chaining must happen here, not via a
@@ -727,7 +793,7 @@ class Daemon:
                     outcome = await self._capture_and_handle(
                         session, until_silence, trigger
                     )
-                    if not self._reopens(outcome):
+                    if once or not self._reopens(outcome):
                         break
                     session = self._begin(trigger)
                     until_silence = True
@@ -737,11 +803,13 @@ class Daemon:
     def _reopens(self, outcome: str) -> bool:
         """Whether the mic goes straight back up after this recording.
 
-        One reason, and it is the awake window: "hey Bol" (or a hold, or a
-        dictation) is said once, and the pauses in the minute that follows
-        are pauses, not the end of the conversation. Never after a STOP, so a
-        turn handed to Claude stays handed over and a dead microphone is not
-        retried in a tight loop.
+        One reason, and it is the awake window, which is off by default: with
+        it open, "hey Bol" (or a hold, or a dictation) is said once and the
+        pauses in the minute that follows are pauses, not the end of the
+        conversation. Off, every listen is one listen, and room noise has
+        nothing to reopen. Never after a STOP either way, so a turn handed to
+        the agent stays handed over and a dead microphone is not retried in a
+        tight loop.
         """
         if self._asleep or self.transcriber is None or outcome == STOP:
             return False
@@ -837,7 +905,8 @@ class Daemon:
                 # reopened the microphone is shut with it.
                 self._awake_until = 0.0
                 self.hud.set("idle")
-                print("bol: cancelled.")
+                why, self._cancel_reason = self._cancel_reason, ""
+                print(f"bol: cancelled ({why})." if why else "bol: cancelled.")
                 return STOP
             if audio is None:
                 log.debug("no speech captured")
@@ -919,7 +988,7 @@ class Daemon:
             # The text WAS typed; only the Enter was withheld. Which is
             # exactly a pending paste, and saying "send it" once the agent is
             # in front is now the way to finish it.
-            log.info("submit withheld: %s", exc)
+            log.debug("submit withheld: %s", exc)
             self._pending_paste = True
             await self._speak(
                 f"Typed it, but that window doesn't look like {self.agent_name}, "
@@ -963,8 +1032,14 @@ class Daemon:
     async def _apply(self, parsed) -> bool:
         action, text = parsed.action, parsed.text
         mode = self.cfg.cleanup.mode
+        # "always" means every dictation there is, whichever way it started:
+        # the "type" flow, a hold, an awake follow-up, and the spoken
+        # "type ..." command too. Raw dictation is not what anybody wants to
+        # hand a coding agent, and a mode called always that skipped one of
+        # the four was the bug people were actually reporting.
         wants_clean = (parsed.clean and mode != "off") or (
-            mode == "always" and action in (Action.DICTATE, Action.SEND)
+            mode == "always"
+            and action in (Action.DICTATE, Action.TYPE, Action.SEND)
         )
         if wants_clean and text:
             cleaned = await clean_transcript(
@@ -990,11 +1065,13 @@ class Daemon:
             )
             # Bol put text in the box and did not submit it, which is the
             # whole precondition for a "send it" that presses Enter on it.
-            # Every paste ends here: nothing Bol pastes is ever sent by
-            # itself, so the pill always says how to send it.
+            # The pill goes away here rather than saying so: the words are on
+            # screen, in the box, where the user is already looking, and a
+            # blue capsule repeating that after every single paste is what
+            # people asked us to take away.
             self._pending_paste = True
-            self.hud.set("sending", PASTE_HINT, hold=PASTE_HINT_S)
-            print("bol: pasted. Say send it to send.")
+            self._idle_pill()
+            print("bol: pasted.")
             return True
         if action is Action.SEND:
             self._permission_session = None
@@ -1002,9 +1079,11 @@ class Daemon:
             # wherever they are looking, Notes and Slack included.
             await self._inject(text, submit=True, explicit=True)
             self._pending_paste = False
-            self.hud.set("sending", "Sent")
+            # Same as a spoken "send it": the pill stays off and the chime is
+            # the receipt.
+            self._idle_pill()
             self._cue("done")
-            print(f"bol: sent. {self.agent_name}'s turn.")
+            print("bol: sent.")
             return False
         if action is Action.DISCARD:
             # C-u wipes the agent's input line. The user said so, so it is
@@ -1107,7 +1186,15 @@ class Daemon:
 
     # ---------------------------------------------------------------- hooks
 
+    # In one-way mode none of these are registered, because there is no hook
+    # server to register them on. They check anyway: "one-way says nothing
+    # about a coding agent" is a promise about the daemon, not about one
+    # call site, and a promise that only holds when nobody calls the method
+    # directly is not one.
+
     async def _on_tool(self, payload: dict) -> None:
+        if not self.talk_back:
+            return
         # Recorded for every session: the tracker is bounded, and the Stop
         # handler is where the session filter decides who gets narrated.
         # A Codex PostToolUse carries no agent marker of its own, so the
@@ -1117,6 +1204,8 @@ class Daemon:
             self.hud.set("thinking", "Thinking", tool_line(tool.tool_name, tool.detail))
 
     async def _on_stop(self, payload: dict) -> None:
+        if not self.talk_back:
+            return
         # Always finish the turn, even for a session we ignore, so its tool
         # log is drained rather than left behind.
         event = self.tracker.finish_turn(payload, self._agent)
@@ -1124,14 +1213,17 @@ class Daemon:
             return
         self._bind_agent(event.agent)
         if self.summarizer is None:
-            # One-way: the turn is over and there is nothing to say about it,
-            # so the pill stops saying Thinking.
             self._idle_pill()
             return
         reply = await self.summarizer.summarize(event)
         await self._speak(reply)
+        # Bol just said something, so the next thing the user says is the
+        # reply to it. One window, then the microphone closes again.
+        await self._follow_up_listen()
 
     async def _on_notification(self, payload: dict) -> None:
+        if not self.talk_back:
+            return
         note = self.tracker.notification(payload, self._agent)
         if not self._follows(note.session_id):
             return
@@ -1149,6 +1241,8 @@ class Daemon:
         Codex has no Notification event, so this is the only place a Codex
         prompt can be read aloud, and the only place "go ahead" gets armed.
         """
+        if not self.talk_back:
+            return
         note = self.tracker.permission_request(payload)
         if not self._follows(note.session_id, payload.get("cwd", "")):
             return
@@ -1156,12 +1250,14 @@ class Daemon:
         await self._ask_permission(note.session_id, note.message)
 
     async def _ask_permission(self, session_id: str, message: str) -> None:
-        # Armed in both modes: the answer is a keystroke, not speech, so
-        # "go ahead" works whether or not Bol reads the question aloud.
         self._permission_session = session_id
         await self._speak(
             f"{message} Say 'go ahead' or 'no'.", state="permission", pill=message
         )
+        # Bol asked a question out loud, so the microphone opens for the
+        # answer. Once, for speak_window_ms, and the question goes back on
+        # the pill if nobody says anything.
+        await self._follow_up_listen(question=message)
 
     # ---------------------------------------------------------------- text mode
 
@@ -1179,6 +1275,7 @@ class Daemon:
                     break
                 await self._handle_utterance(line)
         finally:
-            await self.server.stop()
+            if self.server is not None:
+                await self.server.stop()
             if self.engine is not None:
                 await self.engine.stop()

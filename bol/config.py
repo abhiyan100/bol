@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -118,11 +119,17 @@ class WakeConfig:
     type_threshold: float = 0.0
     # How long a pause ends a "type" dictation and pastes it. Longer than the
     # [audio] silence_ms the conversation flow uses: dictating a prompt has
-    # thinking pauses in it, and the user asked for three seconds.
-    pause_ms: int = 3000
-    # After a wake, a dictation or a hold, the next thing you say needs no
-    # trigger word. 0 means only trigger words ever start anything.
-    awake_s: float = 60.0
+    # thinking pauses in it. Two seconds, and the paste is instant after them.
+    pause_ms: int = 2000
+    # How long the pill waits for you to start speaking after a trigger word
+    # (or after Bol asked you something). Nothing said in that window and the
+    # pill goes away again, so a trigger heard across the room costs five
+    # seconds of a dark capsule and nothing else.
+    speak_window_ms: int = 5000
+    # After a trigger word or a hold, how long follow-up speech needs no
+    # trigger. 0 = only trigger words and the key ever start listening
+    # (the default; room noise cannot wake the pill). 60 = a free minute.
+    awake_s: float = 0.0
 
 
 @dataclass
@@ -157,8 +164,10 @@ class CleanupConfig:
     # deterministic rules (fillers, stutters, "auth dot py" -> "auth.py");
     # api mode adds an LLM grammar pass by the user's own model. Small local
     # models are never given the rewrite job (they drop clauses).
-    # off: never. on_command: when you say "clean it up". always: every time.
-    mode: str = "on_command"  # off | on_command | always
+    # off: never. on_command: when you say "clean it up". always: every time,
+    # which is the default because raw dictation is not what anybody wants to
+    # hand a coding agent.
+    mode: str = "always"  # off | on_command | always
     deadline_s: float = 2.5
     # Bol's own tuned cleanup model (HF repo or local path), used after the
     # deterministic rules when mlx-lm is installed. Empty = rules only.
@@ -238,6 +247,16 @@ UI_POSITIONS = ("top", "bottom")
 
 
 @dataclass
+class SetupConfig:
+    # What the `bol setup` wizard was told, so a rerun knows which coding
+    # agents this Mac dictates into without asking again. "auto" is nobody
+    # having answered yet: look at PATH. A list is an answer, and the empty
+    # list is the answer "no coding agent", which is why this cannot simply
+    # default to [] -- the two have to stay tellable apart.
+    agents: list | str = "auto"  # "auto" | ["claude"] | ["claude", "codex"] | []
+
+
+@dataclass
 class Config:
     # Voice-command phrase overrides: {"send": [...], "type": [...],
     # "discard": [...], "sleep": [...], "interrupt": [...], "repeat": [...],
@@ -255,6 +274,7 @@ class Config:
     bridge: BridgeConfig = field(default_factory=BridgeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     ui: UiConfig = field(default_factory=UiConfig)
+    setup: SetupConfig = field(default_factory=SetupConfig)
     # Speak what Claude did. Off by default, which makes Bol one-way: your
     # voice goes in, nothing comes back out loud, and no summarizer, no
     # voice model and no local LLM server are ever loaded. true (or
@@ -284,7 +304,7 @@ def load_config(path: Path | None = None) -> Config:
             data = tomllib.load(f)
         for name in (
             "audio", "stt", "hotkey", "wake", "tts", "llm", "cleanup",
-            "vocabulary", "summarizer", "bridge", "server", "ui",
+            "vocabulary", "summarizer", "bridge", "server", "ui", "setup",
         ):
             if name in data and isinstance(data[name], dict):
                 _apply(getattr(cfg, name), data[name])
@@ -368,6 +388,17 @@ def validate_wake(wake: WakeConfig) -> None:
             "pause ends a dictation and pastes it."
         )
     try:
+        speak_window = float(wake.speak_window_ms)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"[wake] speak_window_ms must be a number, not {wake.speak_window_ms!r}."
+        )
+    if speak_window <= 0:
+        raise ValueError(
+            f"[wake] speak_window_ms must be above 0, not {speak_window}. It is "
+            "how long the pill waits for you to start speaking."
+        )
+    try:
         awake = float(wake.awake_s)
     except (TypeError, ValueError):
         raise ValueError(f"[wake] awake_s must be a number, not {wake.awake_s!r}.")
@@ -397,7 +428,7 @@ key = "alt_r"          # right Option. Hold it, talk, let go, and what you said 
 
 [wake]
 # The trigger words, listened for from the moment Bol starts, so there is no
-# key to press. Say "type" and talk; pause three seconds and it is pasted.
+# key to press. Say "type" and talk; pause two seconds and it is pasted.
 # Say "send it" and it is sent. Say "hey Bol" for the conversation flow,
 # which needs talk_back = true above to have anyone to talk to.
 # Here is what leaving this on actually does.
@@ -414,13 +445,17 @@ type_phrases = ["type"]            # starts dictation; pause pause_ms and it is 
 send_phrases = ["send it", "send", "enter"]  # presses Enter on a pending paste
 cancel_phrases = ["scratch that", "close"]   # wipes a pending paste
 sleep_phrases = ["stop listening"] # pause Bol; press the hotkey to resume
-pause_ms = 3000        # a pause this long ends a "type" dictation and pastes it
+pause_ms = 2000        # a pause this long ends a "type" dictation and pastes it
+speak_window_ms = 5000 # how long the pill waits for you to start speaking after a
+                       # trigger word before it gives up and goes away again
 threshold = 0.12       # trigger probability; lower hears more, including the TV
 # type_threshold = 0.0 # "type" only; 0 = use threshold. Raising it costs the real
 #                      # "type ..." before it costs the one inside "prototype", so
 #                      # if false dictation bothers you, change type_phrases instead.
-awake_s = 60           # after a trigger word or a hold, the next thing you say needs none.
-                       # 0 = only trigger words ever start anything.
+awake_s = 0            # after a trigger word or a hold, how long follow-up speech needs
+                       # no trigger. 0 = only trigger words and the key ever start
+                       # listening (default; room noise cannot wake the pill).
+                       # 60 = a free minute.
 
 # Remap any voice command to whatever you like. Unset keys keep defaults.
 # [commands]
@@ -444,7 +479,7 @@ live = true            # show words in the pill while you talk (display only)
 #                             # buffer, so smaller redraws more often and costs more.
 
 [tts]
-engine = "say"         # or "kokoro" (pip install 'bol[kokoro]')
+engine = "say"         # "say" is instant; "kokoro" is a neural voice (pip install 'bol[kokoro]')
 
 [llm]
 provider = "local"     # local (no key needed) | api (your key) | off
@@ -457,7 +492,7 @@ local_model = "mlx-community/LFM2.5-1.2B-Instruct-4bit"
 # api_key_env = "BOL_API_KEY"
 
 [cleanup]
-mode = "on_command"    # say "clean it up" | "always" | "off"
+mode = "always"        # every dictation | "on_command" (say "clean it up") | "off"
 model = "abhiyan10/bol-cleanup-350m-4bit"  # Bol's own 195MB model; "" = rules only
 
 [vocabulary]
@@ -480,6 +515,13 @@ anywhere = true        # dictation lands wherever the cursor is: Notes, Slack, a
 port = 8770
 # follow = "first"      # narrate one Claude Code session at a time; "all" narrates every session
 # allow_remote = false  # true lets the hook server bind off loopback (your network can type into your terminal)
+
+[setup]
+# What you told the `bol setup` wizard, so a rerun installs hooks for the same
+# coding agents without asking again. "auto" is nobody having answered yet:
+# whichever of the two is on your PATH. agents = [] means no coding agent, and
+# then Bol is pure dictation and touches no settings file at all.
+agents = "auto"        # "auto" | ["claude"] | ["codex"] | ["claude", "codex"] | []
 """
 
 
@@ -537,6 +579,91 @@ def write_default_config() -> Path:
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(DEFAULT_CONFIG_TOML)
     return CONFIG_PATH
+
+
+# ------------------------------------------------- writing the wizard's answers
+#
+# Two ways in, and the difference is whose file it is. A machine with no
+# config yet gets the documented template with the answers substituted into
+# it, comments and all. A machine that already has one gets its own values
+# edited and everything else left alone, which is a tomllib read and a
+# tomli_w write, and that loses the comments. The wizard says so when it
+# happens rather than quietly flattening a file somebody wrote by hand.
+
+_ASSIGN = re.compile(r"^(\s*)(#\s*)?([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*(.*)$")
+
+
+def _toml_literal(value: object) -> str:
+    """The few TOML scalars the wizard writes. Deliberately not a serializer."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+    raise ValueError(f"cannot write {value!r} to the config file")
+
+
+def render_default_config(values: dict | None = None) -> str:
+    """DEFAULT_CONFIG_TOML with these values substituted.
+
+    values is {(section or None, key): value}. A key the template ships
+    commented out (input_device) is uncommented; the trailing comment on the
+    line is kept, because it is the documentation the file exists for.
+    """
+    remaining = dict(values or {})
+    section: str | None = None
+    lines: list[str] = []
+    for line in DEFAULT_CONFIG_TOML.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+        match = _ASSIGN.match(line)
+        if match:
+            indent, _commented, key, rest = match.groups()
+            target = (section, key)
+            if target in remaining:
+                value = remaining.pop(target)
+                cut = rest.find("  #")
+                head = f"{indent}{key} = {_toml_literal(value)}"
+                if cut < 0:
+                    line = head
+                else:
+                    # Keep the comment in the column it was written in, so a
+                    # substituted file still reads as the documented template.
+                    column = len(line) - len(rest) + cut
+                    line = head.ljust(max(column, len(head) + 2)) + rest[cut:].lstrip()
+        lines.append(line)
+    if remaining:
+        raise ValueError(f"no such key in the default config: {sorted(remaining)}")
+    return "\n".join(lines) + "\n"
+
+
+def write_config_values(values: dict, path: Path | None = None) -> tuple[Path, bool]:
+    """Save the wizard's answers. Returns (path, comments_were_lost)."""
+    path = path or CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(render_default_config(values))
+        return path, False
+    import tomli_w
+
+    with open(path, "rb") as handle:
+        data = tomllib.load(handle)
+    for (section, key), value in values.items():
+        table = data
+        if section is not None:
+            if not isinstance(data.get(section), dict):
+                data[section] = {}
+            table = data[section]
+        table[key] = value
+    with open(path, "wb") as handle:
+        tomli_w.dump(data, handle)
+    return path, True
 
 
 def hook_token() -> str:

@@ -129,7 +129,7 @@ drop to their low-quality route while any app holds the mic.
 
 **Hold to talk, say type to talk.** There are two ways to start: holding
 right Option begins recording and pastes on release, no Enter; saying "type"
-begins dictation that ends after a 3 s pause, which pastes it, also without
+begins dictation that ends after a 2 s pause, which pastes it, also without
 Enter. Endpointing uses Silero VAD (pysilero-vad, a 2.4 MB wheel with no
 dependencies, about 1 ms per 32 ms block): speech starts after two blocks
 above 0.5, ends after `silence_ms` below 0.35. The old energy gate remains
@@ -138,9 +138,12 @@ measured any room tone, which is why it is no longer the default. Nothing
 is ever sent by itself: pasting is the only thing either start does on its
 own, and Enter still needs a spoken send phrase, a wake keyword, or a
 permission answer, so a paste can sit and wait rather than firing on a
-guess about intent. The awake window, 60 s after any hold or trigger, is
-what replaced hands-free reopen: a follow-up inside that window needs
-neither the key nor "hey Bol" again. The hotkey listener checks pynput's
+guess about intent. The awake window ([wake] awake_s) ships off: with it
+open, room noise kept reopening the microphone and the pill kept coming
+back, so a follow-up needs the key or a trigger word again unless the user
+sets a window. Two-way Bol opens the microphone once, for
+[wake] speak_window_ms, after it has spoken a summary or a question, which
+is the one follow-up that needs no phrase. The hotkey listener checks pynput's
 `IS_TRUSTED` after start and raises a clear Input Monitoring error instead
 of silently never firing.
 
@@ -179,7 +182,8 @@ captures the words right after the phrase, the phrase is stripped before
 the grammar, and dictation is pasted once the pause ends, without Enter.
 Measured: 2.5 percent of one core idle, detection at threshold 0.12 on two synthetic
 voices with no false wakes on 30 s of speech. Muted while Bol speaks and
-for 500 ms after, and a 60 s awake window means follow-ups need no phrase.
+for 500 ms after. A trigger word gives the speaker speak_window_ms to start
+talking and then hides the pill again.
 
 **The pill is a separate process.** State on screen (listening, finalizing,
 thinking with the running tool, permission, speaking, error with its remedy)

@@ -343,7 +343,19 @@ async def clean_transcript(
     # The tuned local model handles the polish only when there is no better
     # option; in api mode the user's own big model does it instead.
     if cleaner is not None and not use_llm:
-        return await cleaner.clean(base, deadline_s)
+        # Bounded and swallowed here as well as inside the cleaner. With
+        # cleanup on every dictation by default, a model that fails to load,
+        # hangs, or raises must cost the polish and never the words: what the
+        # user said still has to reach the box.
+        import asyncio
+
+        try:
+            return await asyncio.wait_for(
+                cleaner.clean(base, deadline_s), timeout=deadline_s
+            )
+        except Exception as exc:
+            log.debug("cleanup skipped, pasting the raw text (%s)", exc)
+            return base
     if not use_llm:
         return base
     try:

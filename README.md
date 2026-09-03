@@ -29,14 +29,30 @@ bol    (with --talk-back) "Login test's in and pytest passes. One warning in
 
 ```bash
 uv tool install "bol[stt,llm] @ git+https://github.com/abhiyan100/bol"
-bol setup     # permissions, models, hooks, checks
+bol setup     # asks three questions, then models, hooks, checks
 bol run
 ```
 
 Requires macOS on Apple Silicon and [uv](https://docs.astral.sh/uv/).
-Setup downloads about 2.5 GB of models the first time (speech 2.3 GB,
-cleanup 0.2 GB, keyword spotting 5 MB). Talk-back adds a 0.6 GB
-summarizer; `,kokoro` in the extras adds a neural voice.
+
+`bol setup` is a short wizard, one question per line, Enter for the default:
+
+1. **What will you dictate into?** Claude Code, Codex CLI, both, or anything
+   at all with no coding agent. This is the only thing that decides which
+   settings files get hooks; pick the last one and nothing of yours is
+   touched.
+2. **Talk-back?** Off by default. On, Bol speaks a summary of what the agent
+   did after each turn, and downloads the summarizer to write it.
+3. **AI cleanup?** On by default: Bol's own 195 MB model fixes fillers,
+   stutters and grammar in every dictation before it is pasted.
+
+Then two more if they apply: which microphone, if you have more than one,
+and which voice, if you turned talk-back on.
+
+It downloads only what you picked, one self-updating line per model: speech
+2.3 GB, cleanup 0.2 GB, keyword spotting 5 MB, plus a 0.6 GB summarizer and
+a 0.3 GB voice with talk-back on. `bol setup --yes` takes every default
+without asking, and so does a setup with no terminal attached.
 
 ## Use
 
@@ -45,7 +61,7 @@ nothing sent until you say so.
 
 | Do this | Bol does |
 |---|---|
-| Say **"type"**, talk, pause 3 s | pastes what you said, no Enter |
+| Say **"type"**, talk, pause 2 s | pastes what you said, no Enter |
 | **Hold right Option**, talk, release | same, for noisy rooms |
 | Say **"send it"** (or "send", "enter") | presses Enter, wherever you are |
 | Say **"scratch that"** | clears what Bol pasted |
@@ -54,12 +70,12 @@ nothing sent until you say so.
 | Say **"go ahead"** / **"no"** | answers a permission prompt |
 
 Works in Claude Code, Codex, Cursor, Terminal, Notes, Slack, a browser
-field: anywhere you can type. After any trigger, Bol stays awake for a
-minute, so follow-ups need no trigger word (`awake_s = 0` makes trigger
-words mandatory). A small pill at the top of the screen shows what Bol is
-hearing and doing: a level meter while you talk, a bounce while the agent
-works, blue when a paste is waiting for "send it", red with the fix when
-something is wrong. It never takes focus.
+field: anywhere you can type. A small pill at the top of the screen shows a
+level meter while you talk and disappears when the text lands. It comes back
+for a bounce while the agent works, and red with the fix when something is
+wrong. Nothing but a trigger word, the hotkey or a question Bol asked out
+loud ever puts it on screen, so a noisy room cannot summon it. It never
+takes focus.
 
 Every phrase is yours to change under `[wake]` and `[commands]`.
 
@@ -125,8 +141,9 @@ talk_back = false            # true: hear what the agent did after each turn
 enabled = true               # listen for trigger words from the start
 type_phrases = ["type"]      # change to "start typing" if "type" fires too often
 send_phrases = ["send it", "send", "enter"]
-pause_ms = 3000              # a pause this long ends a "type" dictation
-awake_s = 60                 # follow-ups need no trigger word for this long
+pause_ms = 2000              # a pause this long ends a "type" dictation
+speak_window_ms = 5000       # how long the pill waits for you to start talking
+awake_s = 0                  # 60: follow-ups need no trigger word for a minute
 
 [hotkey]
 key = "alt_r"                # right Option. On AltGr layouts use "cmd_r" or "f13"
@@ -142,7 +159,7 @@ anywhere = true              # false: terminals and IDEs only
 words = ["Abhiyan", "Kokoro"]   # names Bol should spell your way
 
 [cleanup]
-mode = "on_command"          # "always" strips fillers from every dictation
+mode = "always"              # every dictation; "on_command" or "off" to do less
 
 [llm]                        # talk-back only
 provider = "local"           # or "api" with base_url, api_model, api_key_env
@@ -178,8 +195,10 @@ Every step falls back to the text before it.
 - The hook server binds `127.0.0.1` only, with a random 128-bit token in
   `~/.config/bol/hook_token` (mode 0600). Non-loopback hosts are refused
   unless you opt in.
-- `bol setup` adds three hooks to `~/.claude/settings.json` and, when Codex
-  CLI is installed, three more to `~/.codex/hooks.json`, each a background
+- Hooks are only for talk-back, and only for the agents you picked in the
+  wizard: answer no to talk-back and no settings file is touched at all.
+  With it on, `bol setup` adds three hooks to `~/.claude/settings.json` and,
+  for Codex CLI, three more to `~/.codex/hooks.json`, each a background
   `curl` to loopback that never fails, so the agent never waits on Bol and
   stays quiet when Bol is off. Setup shows the entry first, writes
   atomically, keeps a one-time backup. `bol hook uninstall` removes them.

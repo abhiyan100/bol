@@ -630,6 +630,10 @@ def _wake_daemon(
 ):
     cfg = Config()
     cfg.ui.sounds = False
+    # No cleanup here: these tests are about trigger words, and the "always"
+    # default would put a 195 MB model in front of every assertion.
+    cfg.cleanup.mode = "off"
+    cfg.cleanup.model = ""
     # Two-way, because several of these tests are about what Bol says and
     # when it is deaf while saying it.
     cfg.talk_back = True
@@ -759,19 +763,20 @@ async def test_going_to_sleep_closes_the_awake_window():
     assert d.recorder.calls == [True]
 
 
-async def test_the_pill_keeps_a_dot_up_while_the_window_is_open():
+async def test_the_pill_goes_away_the_moment_the_words_land():
+    # The user feedback this exists for: "after pasting the content the pill
+    # should close itself". No blue hint, no awake dot, nothing left over,
+    # and that holds even with the awake window open behind it.
     clock = Clock()
     d = _wake_daemon(1, ["add a login test"], clock, awake_s=60.0)
 
     d._wake_detected(0.6)
     await asyncio.sleep(0.05)
 
-    # The paste says how to send it, and after that the window is still open,
-    # which is worth a dot rather than a blank screen. The blank screen comes
-    # back exactly once, when the window finally closes.
     states = d.hud.states
-    assert states[:4] == ["listening", "finalizing", "sending", "awake"]
-    assert states.count("idle") == 1
+    assert states[:3] == ["listening", "finalizing", "idle"]
+    assert "sending" not in states
+    assert "awake" not in states
     assert states[-1] == "idle"
 
 
@@ -843,8 +848,11 @@ def test_the_trigger_words_are_on_by_default():
     assert cfg.sleep_phrases == ["stop listening"]
     assert cfg.threshold == 0.12
     assert cfg.type_threshold == 0.0  # 0 = use threshold
-    assert cfg.pause_ms == 3000
-    assert cfg.awake_s == 60.0
+    assert cfg.pause_ms == 2000        # two seconds, then the paste is instant
+    assert cfg.speak_window_ms == 5000  # how long the pill waits for speech
+    # Off by default: with the window open, room noise kept reopening the
+    # microphone and the pill kept coming back.
+    assert cfg.awake_s == 0.0
 
 
 def test_two_configs_do_not_share_a_phrase_list():
@@ -872,20 +880,23 @@ def test_the_default_file_is_honest_about_the_open_microphone():
         "Wake mode keeps the microphone open",
         "Nothing is recorded or sent anywhere.",
         "false wake costs a Listening pill",
-        "Turn your wifi off and try it",
+        "Bol itself needs no internet",
         # On by default now, so the way to close it has to be right there.
         "enabled = false to close the microphone",
     ):
         assert promise in section
 
 
-def test_the_default_file_says_zero_disables_the_awake_window():
-    # The answer to "I want only trigger words to start anything" is a knob,
-    # and a knob nobody can find is not an answer.
+def test_the_default_file_explains_the_awake_window_it_ships_off():
+    # It ships at 0 because room noise kept reopening the mic. The file has
+    # to say both what that means and how to get the minute back.
     from bol.config import DEFAULT_CONFIG_TOML
 
     section = DEFAULT_CONFIG_TOML.split("[wake]", 1)[1]
-    assert "0 = only trigger words ever start anything" in section
+    assert "awake_s = 0" in section
+    assert "only trigger words and the key ever start" in section
+    assert "room noise cannot wake the pill" in section
+    assert "60 = a free minute" in section
 
 
 def test_the_type_threshold_is_documented_as_the_wrong_lever():
@@ -906,6 +917,7 @@ def test_load_config_reads_the_wake_section(tmp_path):
         "type_phrases = [\"dictate\"]\nsend_phrases = [\"off you go\"]\n"
         "cancel_phrases = [\"forget it\"]\nsleep_phrases = [\"that's enough\"]\n"
         "threshold = 0.3\ntype_threshold = 0.4\npause_ms = 1500\nawake_s = 15\n"
+        "speak_window_ms = 9000\n"
     )
 
     cfg = load_config(path)
@@ -920,6 +932,7 @@ def test_load_config_reads_the_wake_section(tmp_path):
     assert cfg.wake.type_threshold == 0.4
     assert cfg.wake.pause_ms == 1500
     assert cfg.wake.awake_s == 15
+    assert cfg.wake.speak_window_ms == 9000
 
 
 def test_a_configured_trigger_word_reaches_the_daemon(tmp_path):
@@ -965,6 +978,8 @@ def test_wake_is_switched_off_in_one_line(tmp_path):
         ("pause_ms", 0, "must be above 0"),
         ("pause_ms", -100, "must be above 0"),
         ("pause_ms", "three", "must be a number"),
+        ("speak_window_ms", 0, "must be above 0"),
+        ("speak_window_ms", "five", "must be a number"),
     ],
 )
 def test_a_wake_section_that_cannot_work_is_refused(field, value, message):
@@ -1041,7 +1056,7 @@ def test_doctor_reports_the_model_and_what_it_listens_for(monkeypatch, tmp_path)
     # should be told to say it.
     assert "listening for: hey bol, type, send it" in rows[2][1]
     assert "threshold 0.12" in rows[2][1]
-    assert "3s pause pastes a dictation" in rows[2][1]
+    assert "2s pause pastes a dictation" in rows[2][1]
     assert rows[3][1] == cli.MIC_NOTE
     assert "microphone indicator stays on" in rows[3][1]
 
@@ -1356,8 +1371,10 @@ async def test_a_type_dictation_ends_on_the_wake_pause_not_the_audio_one():
 
     session = d.recorder.sessions[0]
     assert session.silence_ms == 3000
-    # And it gives the microphone back after the same pause if nobody speaks.
-    assert session.window_ms == 3000
+    # And it gives the microphone back after speak_window_ms if nobody speaks:
+    # the two ends of the recording are two settings now, because "how long a
+    # pause lasts" and "how long to wait for a first word" are two questions.
+    assert session.window_ms == d.cfg.wake.speak_window_ms == 5000
 
 
 async def test_a_wake_keeps_the_audio_pause_and_takes_the_short_window():
@@ -1369,7 +1386,7 @@ async def test_a_wake_keeps_the_audio_pause_and_takes_the_short_window():
 
     session = d.recorder.sessions[0]
     assert session.silence_ms is None  # a conversation pauses like a conversation
-    assert session.window_ms == 3000   # but still gives up in seconds
+    assert session.window_ms == 5000   # but still gives up in seconds
 
 
 async def test_a_hotkey_recording_keeps_every_configured_timing():
@@ -1402,16 +1419,46 @@ async def test_a_type_dictation_never_presses_enter():
     assert d._pending_paste is True
 
 
-async def test_a_type_dictation_says_how_to_send_it():
+async def test_a_type_dictation_takes_its_own_pill_down():
     clock = Clock()
     d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
 
     d._wake_detected(0.6, "type")
     await asyncio.sleep(0.05)
 
-    hint = ("sending", daemon_mod.PASTE_HINT, "")
-    assert hint in d.hud.calls
-    assert d.hud.holds[d.hud.calls.index(hint)] == daemon_mod.PASTE_HINT_S
+    assert d.hud.states[-1] == "idle"
+    assert "sending" not in d.hud.states
+    assert d._pending_paste is True  # still pending; the pill just says nothing
+
+
+async def test_a_type_dictation_waits_speak_window_ms_for_speech():
+    # The trigger word decides both ends of the recording: speak_window_ms to
+    # start talking, pause_ms of silence to end it.
+    clock = Clock()
+    d = _wake_daemon(1, ["add a login test"], clock, awake_s=0.0)
+    d.cfg.wake.speak_window_ms = 4000
+    d.cfg.wake.pause_ms = 2000
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    session = d.recorder.sessions[0]
+    assert session.window_ms == 4000
+    assert session.silence_ms == 2000
+
+
+async def test_a_trigger_that_hears_nothing_hides_the_pill_again():
+    # Five seconds of nothing said is a trigger word heard across the room.
+    # It costs one dark capsule and then the screen is clear again.
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, awake_s=0.0)
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.sessions[0].window_ms == d.cfg.wake.speak_window_ms
+    assert d.hud.states == ["listening", "idle"]
+    assert d.bridge.injected == []
 
 
 async def test_an_explicit_send_it_still_sends_a_type_dictation():
@@ -1440,7 +1487,7 @@ async def test_a_type_dictation_stays_awake_for_the_next_sentence():
         ("add a login test ", False),
         ("and a logout test ", False),
     ]
-    assert all(s.silence_ms == 3000 for s in d.recorder.sessions)
+    assert all(s.silence_ms == 2000 for s in d.recorder.sessions)
 
 
 async def test_awake_s_zero_means_only_trigger_words_start_anything():
@@ -1491,7 +1538,9 @@ async def test_a_send_trigger_presses_enter_on_a_pending_paste():
     assert d.bridge.keys == [("Enter",)]
     assert d._pending_paste is False
     assert d.recorder.calls == [True]  # it started no recording of its own
-    assert d.hud.calls[-1][:2] == ("sending", "Sent")
+    # And nothing on screen: the text left the box where the user is looking,
+    # and the chime is the whole receipt.
+    assert d.hud.calls[-1] == ("idle", "", "")
 
 
 async def test_a_send_trigger_with_nothing_pasted_is_ignored():
@@ -1577,7 +1626,7 @@ async def test_a_sleep_trigger_pauses_the_ear_as_well_as_the_loop():
     assert d.wake.muted is True  # no trigger words, and no core burnt on them
     assert d._awake() is False
     assert ("sending", daemon_mod.SLEEP_HINT, "") in d.hud.calls
-    assert d.hud.holds[-1] == daemon_mod.PASTE_HINT_S
+    assert d.hud.holds[-1] == daemon_mod.HINT_S
 
 
 async def test_a_paused_bol_ignores_every_trigger_word():

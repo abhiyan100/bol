@@ -4,7 +4,8 @@
   bol run              start the voice daemon (hotkey + mic)
   bol run --talk-back  ... and hear what Claude did
   bol run --text       text mode, the same loop typed instead of spoken
-  bol setup            first run: download models, install hooks, check permissions
+  bol setup            first run: a few questions, then models, hooks, checks
+  bol setup --yes      the same, taking the default answer to every question
   bol hook install     add Bol's hooks to Claude Code (--agent codex for Codex CLI)
   bol hook uninstall   remove them
   bol doctor           check environment, permissions, and wiring
@@ -25,6 +26,8 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
+import time
 
 from . import __version__, install_hint
 from .config import (
@@ -32,6 +35,7 @@ from .config import (
     hook_token,
     load_config,
     removed_keys,
+    write_config_values,
     write_default_config,
 )
 from .hooks import installer
@@ -53,19 +57,22 @@ def _url(cfg) -> str:
     return f"{_base_url(cfg)}?token={hook_token()}"
 
 
-def detected_agents() -> list[str]:
-    """Every coding agent Bol can wire that is actually installed here.
-
-    Hooks are per agent and Bol talks back for both, so setup and doctor look
-    at PATH rather than assuming Claude Code. With neither on PATH the answer
-    is still Claude Code: setup should write the hooks the user is about to
-    need, not nothing at all.
-    """
-    return _agents_on_path() or ["claude"]
-
-
 def _agents_on_path() -> list[str]:
     return [a for a in installer.AGENTS if shutil.which(installer.AGENT_CLI[a])]
+
+
+def chosen_agents(cfg) -> list[str]:
+    """The agents the setup wizard was told about, or what is on PATH.
+
+    A list in [setup] agents is an answer and wins, the empty list included:
+    that is somebody who said "anything, no coding agent" and must not be
+    talked out of it by a `claude` binary sitting on their PATH. "auto" is
+    nobody having answered.
+    """
+    agents = getattr(cfg.setup, "agents", "auto")
+    if isinstance(agents, list):
+        return [a for a in agents if a in installer.AGENTS]
+    return _agents_on_path()
 
 
 def _print_rows(rows: list[tuple[str, str, str]]) -> bool:
@@ -202,9 +209,19 @@ def probe_packages(cfg) -> list[tuple[str, str, str]]:
 def probe_wiring(cfg) -> list[tuple[str, str, str]]:
     rows = []
     url = _url(cfg)
-    # One row per agent installed on this machine: hooks live in a different
-    # file for each, and wiring one says nothing about the other.
-    for agent in detected_agents():
+    if not cfg.talk_back:
+        # Hooks exist so a coding agent can tell Bol a turn ended, and one-way
+        # Bol has nothing to say about a turn. Missing hooks are not a fault
+        # here, and reporting them as one sends people to fix something that
+        # is doing nothing for them.
+        rows.append((
+            INFO,
+            "hooks: not needed for dictation (talk_back = false)",
+            "",
+        ))
+    # One row per chosen agent: hooks live in a different file for each, and
+    # wiring one says nothing about the other.
+    for agent in [] if not cfg.talk_back else chosen_agents(cfg):
         label = installer.AGENT_LABELS[agent]
         try:
             hooks_ok = installer.installed(url, agent=agent)
@@ -214,8 +231,7 @@ def probe_wiring(cfg) -> list[tuple[str, str, str]]:
         rows.append((
             OK if hooks_ok else BAD,
             f"hooks installed for {label} (user scope)",
-            f"bol hook install --agent {agent} "
-            "(or just run `bol run`, it installs them)",
+            f"bol hook install --agent {agent}",
         ))
     # A missing config file is normal: every key has a default.
     if CONFIG_PATH.exists():
@@ -639,12 +655,19 @@ def probe_wake(cfg) -> list[tuple[str, str, str]]:
             f"keyword model: not in {root} ({', '.join(missing_files(root))})",
             "run `bol setup` to fetch it",
         ))
+    awake = float(cfg.wake.awake_s)
+    follow_up = (
+        f"awake for {awake:g}s after anything you say"
+        if awake > 0
+        else "every listen needs a trigger word or the key (awake_s = 0)"
+    )
     rows.append((
         INFO,
         f"listening for: {wake_heard(cfg)} "
         f"(threshold {float(cfg.wake.threshold):g}, "
         f"{float(cfg.wake.pause_ms) / 1000:g}s pause pastes a dictation, "
-        f"awake for {float(cfg.wake.awake_s):g}s after anything you say)",
+        f"{float(cfg.wake.speak_window_ms) / 1000:g}s to start talking, "
+        f"{follow_up})",
         "",
     ))
     rows.append((INFO, MIC_NOTE, ""))
@@ -762,20 +785,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     _quiet_model_libraries(cfg)
     for hint in removed_keys():
         print(f"bol: {hint}")
-    missing = [a for a in detected_agents() if not installer.installed(_url(cfg), agent=a)]
-    if missing:
-        names = ", ".join(installer.AGENT_LABELS[a] for a in missing)
-        print(f"bol: hooks not installed for {names}, doing it for you.")
-        for agent in missing:
-            # Drop stale token-less entries first.
-            installer.uninstall(_base_url(cfg), agent=agent)
-            installer.install(_url(cfg), agent=agent)
-            if agent == "codex":
-                print(f"bol: {installer.CODEX_TRUST_NOTE}")
-        print(
-            "bol: note, agent sessions started before this need a "
-            "restart to pick up hooks."
-        )
+    _warn_missing_hooks(cfg)
     _warn_missing_weights(cfg)
     try:
         if not args.text:
@@ -846,6 +856,32 @@ def _quiet_model_libraries(cfg) -> None:
             pass
 
 
+def _warn_missing_hooks(cfg) -> None:
+    """One hint line when talk-back has nothing to listen to.
+
+    Bol no longer writes into an agent's settings file behind the user's
+    back: hooks are asked for in `bol setup` and installed by
+    `bol hook install`, and one-way dictation needs neither. This is the one
+    line that says so, and only for the mode that actually wants them.
+    """
+    if not cfg.talk_back:
+        return
+    try:
+        missing = [
+            a for a in chosen_agents(cfg) if not installer.installed(_url(cfg), agent=a)
+        ]
+    except SystemExit:
+        return
+    if not missing:
+        return
+    names = ", ".join(installer.AGENT_LABELS[a] for a in missing)
+    flags = "".join(f" --agent {a}" for a in missing if a != "claude")
+    print(
+        f"bol: talk-back needs hooks and {names} has none. "
+        f"Run `bol hook install{flags}` (or `bol setup`)."
+    )
+
+
 def _warn_missing_weights(cfg) -> None:
     """One line, not a wall: first use still works, it just pauses to download."""
     try:
@@ -894,13 +930,190 @@ def cmd_config(_args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_setup(_args: argparse.Namespace) -> int:
+# -------------------------------------------------------------------- wizard
+#
+# Five questions at most, and every one of them decides something expensive:
+# which settings files are touched, and which gigabyte is downloaded. The
+# defaults are what a fresh install wants, so Enter five times is a good
+# install; --yes (and a pipe, which is the same thing without a person in
+# front of it) takes every default without asking.
+
+# Question 1's answers, in order, and the agents each one means.
+AGENT_CHOICES = (
+    ("Claude Code", ["claude"]),
+    ("Codex CLI", ["codex"]),
+    ("both", ["claude", "codex"]),
+    ("anything, no coding agent", []),
+)
+
+TALK_BACK_Q = "Hear what the agent did after each turn (talk-back)?"
+CLEANUP_Q = (
+    "Clean up your dictation with Bol's AI model "
+    "(fillers, stutters, grammar, 195 MB)?"
+)
+VOICE_CHOICES = (
+    ("macOS say (instant)", "say"),
+    ("Kokoro neural voice (340 MB)", "kokoro"),
+)
+
+COMMENTS_LOST = (
+    "  note: your config already existed, so it was rewritten with the new "
+    "values and its comments were not kept."
+)
+
+
+def _interactive(assume_yes: bool) -> bool:
+    """Is there a person to ask? A pipe answers like --yes, silently."""
+    if assume_yes:
+        return False
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _ask(prompt: str, default: str, interactive: bool) -> str:
+    """One line, one answer. Enter (or no terminal) takes the default."""
+    if not interactive:
+        print(f"{prompt} [{default}]")
+        return default
+    try:
+        reply = input(f"{prompt} [{default}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    return reply or default
+
+
+def _ask_choice(question: str, labels, default: int, interactive: bool) -> int:
+    """A numbered question on one line. Returns a 1-based index."""
+    options = " ".join(f"[{i}] {label}" for i, label in enumerate(labels, 1))
+    while True:
+        reply = _ask(f"{question} {options}", str(default), interactive)
+        try:
+            choice = int(reply)
+        except ValueError:
+            choice = 0
+        if 1 <= choice <= len(labels):
+            return choice
+        print(f"  please answer 1 to {len(labels)}.")
+
+
+def _ask_yes_no(question: str, default: bool, interactive: bool) -> bool:
+    hint = "Y/n" if default else "y/N"
+    while True:
+        # _ask hands the bracketed hint back when Enter was pressed, which is
+        # how "the default" arrives here without a second sentinel.
+        reply = _ask(question, hint, interactive).strip().lower()
+        if reply == hint.lower():
+            return default
+        if reply in ("y", "yes"):
+            return True
+        if reply in ("n", "no"):
+            return False
+        print("  please answer y or n.")
+
+
+def input_device_names() -> list[str]:
+    """Every microphone macOS will admit to, in sounddevice's own order."""
+    try:
+        import sounddevice as sd
+
+        devices = sd.query_devices()
+    except Exception:
+        return []
+    names: list[str] = []
+    for device in devices:
+        try:
+            if int(device.get("max_input_channels", 0)) <= 0:
+                continue
+            name = str(device.get("name", "")).strip()
+        except Exception:
+            continue
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _default_agent_choice(cfg) -> int:
+    agents = chosen_agents(cfg)
+    for index, (_label, choice_agents) in enumerate(AGENT_CHOICES, 1):
+        if choice_agents == agents:
+            return index
+    return len(AGENT_CHOICES)  # nothing recognisable: no coding agent
+
+
+def run_wizard(cfg, assume_yes: bool = False) -> dict:
+    """Ask, then write the answers into cfg. Returns the config values to save.
+
+    cfg is mutated on purpose: everything after this (which models, which
+    hooks, which checks) reads the answers off it, so there is one source of
+    truth and no second copy to disagree with the file.
+    """
+    interactive = _interactive(assume_yes)
+    if not interactive:
+        print("(no questions: taking the default answer to each)\n")
+
+    choice = _ask_choice(
+        "What will you dictate into?",
+        [label for label, _agents in AGENT_CHOICES],
+        _default_agent_choice(cfg),
+        interactive,
+    )
+    agents = list(AGENT_CHOICES[choice - 1][1])
+    cfg.setup.agents = agents
+
+    # No coding agent means nothing to talk back about, so the question is
+    # not asked and the answer is no.
+    talk_back = (
+        _ask_yes_no(TALK_BACK_Q, bool(cfg.talk_back), interactive) if agents else False
+    )
+    cfg.talk_back = talk_back
+
+    clean = _ask_yes_no(CLEANUP_Q, cfg.cleanup.mode != "off", interactive)
+    cfg.cleanup.mode = "always" if clean else "off"
+    cfg.cleanup.model = "abhiyan10/bol-cleanup-350m-4bit" if clean else ""
+
+    values = {
+        (None, "talk_back"): talk_back,
+        ("setup", "agents"): agents,
+        ("cleanup", "mode"): cfg.cleanup.mode,
+        ("cleanup", "model"): cfg.cleanup.model,
+    }
+
+    devices = input_device_names()
+    if len(devices) > 1:
+        pick = _ask_choice("Microphone:", devices, 1, interactive)
+        cfg.audio.input_device = devices[pick - 1]
+        values[("audio", "input_device")] = cfg.audio.input_device
+
+    if talk_back:
+        default_voice = 2 if cfg.tts.engine == "kokoro" else 1
+        pick = _ask_choice(
+            "Voice:",
+            [label for label, _engine in VOICE_CHOICES],
+            default_voice,
+            interactive,
+        )
+        cfg.tts.engine = VOICE_CHOICES[pick - 1][1]
+        values[("tts", "engine")] = cfg.tts.engine
+
+    return values
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    # Before anything imports huggingface_hub, so its byte bars and its
+    # "unauthenticated requests" warning never get the chance to print. The
+    # one line per model below is the whole download report.
+    _quiet_downloads()
     cfg = load_config()
     print(f"bol {__version__} setup\n")
 
-    existed = CONFIG_PATH.exists()
-    path = write_default_config()
-    print(f"config: {'already at' if existed else 'written to'} {path}")
+    values = run_wizard(cfg, assume_yes=getattr(args, "yes", False))
+    path, rewritten = write_config_values(values)
+    print(f"\nconfig: {path}")
+    if rewritten:
+        print(COMMENTS_LOST)
     for hint in removed_keys():
         print(f"  note: {hint}")
     print()
@@ -928,6 +1141,122 @@ def cmd_setup(_args: argparse.Namespace) -> int:
             "Then run `bol run` and hold right Option to talk."
         )
     return 0 if ok else 1
+
+
+# ------------------------------------------------------------- downloading
+#
+# What a first install used to look like: a wall of Hugging Face byte bars,
+# a warning about unauthenticated requests, and no way to tell which of the
+# four models was moving. What it looks like now: one line per model that
+# rewrites itself, and nothing else.
+
+# Loggers that narrate a download. ERROR for the length of setup, so a real
+# failure still reaches the terminal and nothing else does.
+_DOWNLOAD_LOGGERS = ("huggingface_hub", "hf_xet", "filelock", "urllib3")
+
+# Wide enough to overwrite the longest progress line when it shortens.
+_LINE_WIDTH = 72
+
+
+def _quiet_downloads() -> None:
+    """Switch off every progress bar and notice but our own.
+
+    The env var has to be set before huggingface_hub is imported, which is
+    why this is the first line of cmd_setup; disable_progress_bars() covers
+    a huggingface_hub that some other import already brought in.
+    """
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    for name in _DOWNLOAD_LOGGERS:
+        logging.getLogger(name).setLevel(logging.ERROR)
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except Exception:
+        pass
+    try:
+        from huggingface_hub import constants
+
+        constants.HF_HUB_DISABLE_PROGRESS_BARS = True
+    except Exception:
+        pass
+
+
+def _progress_size(size: float) -> str:
+    """Two decimals in GB, whole MB below that: a number that moves."""
+    if size >= 1024**3:
+        return f"{size / 1024 ** 3:.2f} GB"
+    return f"{size / (1024 * 1024):.0f} MB"
+
+
+def progress_line(role: str, done: float, total: float, speed: float) -> str:
+    """  speech to text  1.14 GB / 2.30 GB  48 MB/s
+
+    The speed field is always there, zero included: a field that comes and
+    goes makes the line jump about, and a line that jumps about is harder to
+    read than one that says 0 MB/s for a second.
+    """
+    line = f"  {role}  {_progress_size(done)}"
+    if total > 0:
+        line += f" / {_progress_size(total)}"
+    return line + f"  {max(speed, 0.0) / (1024 * 1024):.0f} MB/s"
+
+
+def _rewrite(out, text: str) -> None:
+    out.write("\r" + text.ljust(_LINE_WIDTH))
+    out.flush()
+
+
+def download_one(
+    role: str,
+    repo: str,
+    download,
+    size_fn,
+    total: float = 0.0,
+    interval: float = 0.5,
+    out=None,
+    clock=time.monotonic,
+) -> bool:
+    """Fetch one model behind a single line that updates in place.
+
+    The Hub's own reporting is off (see _quiet_downloads), so progress is
+    measured the only way that stays true for every backend: by watching the
+    cache directory grow, from a thread, while the download runs.
+    """
+    out = out or sys.stdout
+    stop = threading.Event()
+
+    def poll() -> None:
+        # Averaged over the whole download, not over the last half second: a
+        # per-tick rate flickers between zero and a burst as files land, and
+        # what the reader wants is "how long is this going to take".
+        first_size, started = size_fn(), clock()
+        _rewrite(out, progress_line(role, first_size, total, 0.0))
+        while not stop.wait(interval):
+            now, size = clock(), size_fn()
+            elapsed = now - started
+            speed = (size - first_size) / elapsed if elapsed > 0 else 0.0
+            _rewrite(out, progress_line(role, size, total, speed))
+
+    watcher = threading.Thread(target=poll, daemon=True)
+    watcher.start()
+    try:
+        download(repo)
+    except Exception as exc:
+        stop.set()
+        watcher.join(timeout=2.0)
+        _rewrite(out, f"  {role}  failed")
+        out.write("\n")
+        out.write(
+            f"bol: could not download {repo} ({exc}). Bol will retry on first use.\n"
+        )
+        return False
+    stop.set()
+    watcher.join(timeout=2.0)
+    _rewrite(out, f"  {role}  done  {_progress_size(size_fn())}")
+    out.write("\n")
+    out.flush()
+    return True
 
 
 def _setup_models(cfg) -> bool:
@@ -979,12 +1308,16 @@ def _setup_models(cfg) -> bool:
 
     ok = True
     for role, repo in missing:
-        print(f"downloading {repo} ({role})")
-        try:
-            snapshot_download(repo)
-        except Exception as exc:
-            ok = False
-            print(f"bol: could not download {repo} ({exc}). Bol will retry on first use.")
+        ok = (
+            download_one(
+                role,
+                repo,
+                snapshot_download,
+                lambda _repo=repo: weights_size_bytes(_repo),
+                total=MODEL_SIZES_MB.get(repo, 0) * 1024 * 1024,
+            )
+            and ok
+        )
     print()
     return ok
 
@@ -1040,17 +1373,27 @@ def _setup_wake(cfg) -> bool:
     return ok
 
 
+NO_HOOKS_LINE = (
+    "hooks: not needed for dictation; `bol hook install` adds them later"
+)
+
+
 def _setup_hooks(cfg) -> None:
     """Show the exact entry going into each agent's file, then write it.
 
-    Every agent whose CLI is on PATH gets wired, so a machine with both
-    Claude Code and Codex CLI ends up with one Bol narrating whichever
-    session speaks first.
+    Only the agents the wizard was told about, and only when talk-back is on:
+    hooks exist so an agent can tell Bol its turn ended, and a Bol that never
+    speaks has no use for that. Somebody who wants dictation gets their
+    settings files left alone, which is what "no coding agent" has to mean.
     """
+    agents = chosen_agents(cfg) if cfg.talk_back else []
+    if not agents:
+        print(f"{NO_HOOKS_LINE}\n")
+        return
     url = _url(cfg)
     shown = url.split("?", 1)[0] + "?token=<your local token>"
     wired = []
-    for agent in detected_agents():
+    for agent in agents:
         label = installer.AGENT_LABELS[agent]
         path = installer.settings_path("user", agent=agent)
         entry: dict = {"hooks": [installer.bol_hook(shown, agent)]}
@@ -1123,7 +1466,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
 
     p_setup = sub.add_parser(
-        "setup", help="download models, install hooks, check permissions"
+        "setup", help="a few questions, then models, hooks, checks"
+    )
+    p_setup.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="take the default answer to every question",
     )
     p_setup.set_defaults(func=cmd_setup)
 

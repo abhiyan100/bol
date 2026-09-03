@@ -159,6 +159,11 @@ class Ticks:
 def _daemon(utterances, texts, talk_back=True, clock=None):
     cfg = Config()
     cfg.ui.sounds = False
+    # The loop tests are about the loop. Cleanup is "always" by default now,
+    # and a real cleaner would load (and on a cold machine download) a 195 MB
+    # model on every utterance; the cleanup tests below build their own fake.
+    cfg.cleanup.mode = "off"
+    cfg.cleanup.model = ""
     # Two-way by default here: most of these tests assert on what Bol says,
     # and one-way has nothing to say. The one-way tests build their own.
     cfg.talk_back = talk_back
@@ -549,10 +554,13 @@ async def test_a_hold_pastes_without_enter_and_leaves_it_pending():
     assert d.bridge.injected == [("add a login test ", False)]
     assert d.bridge.explicit == [False]        # a paste claims no intent
     assert d._pending_paste is True
-    assert ("sending", daemon_mod.PASTE_HINT, "") in d.hud.calls
+    # The pill goes away the moment the words land: no blue hint, no hold.
+    assert "sending" not in d.hud.states
+    assert d.hud.states[-1] == "idle"
     # And the words heard kept the microphone awake, so the reopen loop went
-    # round again instead of handing the turn back to the key.
-    assert d.recorder.calls == [False, True]
+    # round again instead of handing the turn back to the key. (How many more
+    # times is the Ticks clock's business, not this test's.)
+    assert d.recorder.calls[:2] == [False, True]
 
 
 @pytest.mark.asyncio
@@ -598,22 +606,24 @@ async def test_the_pill_shows_listening_on_the_keystroke():
 
 
 @pytest.mark.asyncio
-async def test_the_pill_says_finalizing_then_how_to_send():
+async def test_the_pill_says_finalizing_and_then_gets_out_of_the_way():
     d = _daemon(1, ["add a login test"])
 
     await d._listen_session(d.recorder.begin(), until_silence=False)
 
-    # The words are in Claude's box now, waiting for the one phrase that
-    # sends them, and the pill is where that is said.
-    assert d.hud.states == ["finalizing", "sending"]
-    assert d.hud.calls[-1] == ("sending", daemon_mod.PASTE_HINT, "")
+    # The words are in the box, which the user can see. Nothing is left on
+    # screen saying so.
+    assert d.hud.states == ["finalizing", "idle"]
+    assert d.hud.calls[-1] == ("idle", "", "")
 
 
 @pytest.mark.asyncio
-async def test_the_pill_says_sent_when_the_turn_goes_to_claude():
+async def test_the_pill_stays_hidden_when_the_turn_goes_to_claude():
+    # "if it hears send it, it just sends, the pill should stop." The chime
+    # is the receipt; the screen says nothing at all.
     d = _daemon(1, ["ship it send"])
     await d._handle_utterance("ship it send")
-    assert d.hud.calls == [("sending", "Sent", "")]
+    assert d.hud.calls == [("idle", "", "")]
 
 
 @pytest.mark.asyncio
@@ -663,9 +673,12 @@ async def test_a_permission_prompt_becomes_a_question_on_the_pill():
             "message": "Claude wants to run rm -rf build.",
         }
     )
-    # The pill keeps the question, not the whole spoken sentence, and it
-    # stays up: there is an answer outstanding.
-    assert d.hud.calls == [("permission", "Claude wants to run rm -rf build.", "")]
+    # The pill keeps the question, not the whole spoken sentence. Bol then
+    # opens the microphone once for the answer, and when nobody says anything
+    # the question goes back up: it is still outstanding.
+    question = ("permission", "Claude wants to run rm -rf build.", "")
+    assert d.hud.calls == [question, ("listening", "Listening", ""), ("idle", "", ""), question]
+    assert d.hud.calls[-1] == question
 
 
 @pytest.mark.asyncio
@@ -1118,38 +1131,37 @@ async def test_a_paste_is_a_paste_however_the_recording_ended():
 
 
 @pytest.mark.asyncio
-async def test_the_pill_says_how_to_send_after_every_paste():
+async def test_the_pill_hides_itself_after_every_paste():
     d = _daemon(1, ["add a login test"])
 
     await d._handle_utterance("add a login test")
 
-    assert d.hud.calls[-1] == ("sending", daemon_mod.PASTE_HINT, "")
-    # Longer than "Sent": this one is a sentence to read, not a receipt.
-    assert d.hud.holds[-1] == daemon_mod.PASTE_HINT_S
-    assert daemon_mod.PASTE_HINT_S == 2.5
-    assert daemon_mod.PASTE_HINT == "Pasted. Say send it to send"
+    assert d.hud.calls[-1] == ("idle", "", "")
+    assert d.hud.holds[-1] == 0.0
+    # The hint is gone entirely, not merely shortened.
+    assert not hasattr(daemon_mod, "PASTE_HINT")
 
 
 @pytest.mark.asyncio
-async def test_a_typed_dictation_gets_the_same_hint():
-    # "type ..." was always paste-only; now it is what every paste does, so
-    # there is one hint and not two.
+async def test_a_typed_dictation_hides_the_pill_too():
+    # "type ..." was always paste-only, and it takes its pill down like every
+    # other paste: one rule, not two.
     d = _daemon(1, ["type hello world"])
 
     await d._handle_utterance("type hello world")
 
     assert d.bridge.injected == [("hello world", False)]
-    assert d.hud.calls[-1] == ("sending", daemon_mod.PASTE_HINT, "")
+    assert d.hud.calls[-1] == ("idle", "", "")
 
 
 @pytest.mark.asyncio
-async def test_the_hint_is_what_the_pill_would_show():
-    # The pill renders "sending" from the caller's own text, not the "Sent"
-    # default, or the hint would never reach the screen.
+async def test_the_pause_hint_is_still_what_the_pill_would_show():
+    # The one line left that the user has to read rather than glance at.
     from bol.hud.render import hold_for, label_for
 
-    assert label_for("sending", daemon_mod.PASTE_HINT) == daemon_mod.PASTE_HINT
-    assert hold_for("sending", daemon_mod.PASTE_HINT_S) == 2.5
+    assert label_for("sending", daemon_mod.SLEEP_HINT) == daemon_mod.SLEEP_HINT
+    assert hold_for("sending", daemon_mod.HINT_S) == 2.5
+    assert daemon_mod.HINT_S == 2.5
     assert hold_for("sending") == 1.0  # every other "Sent" is unchanged
 
 
@@ -1391,17 +1403,22 @@ async def test_one_way_keeps_an_error_on_the_pill():
 
 
 @pytest.mark.asyncio
-async def test_one_way_says_nothing_when_claude_finishes():
+async def test_one_way_says_nothing_at_all_when_claude_finishes():
     d = _one_way()
 
     await d._on_stop(_stop("A"))
 
-    # No summary, and the pill stops saying Thinking.
-    assert d.hud.states == ["idle"]
+    # Not a summary, not a pill, not a bound session, not a printed name.
+    # One-way is dictation, and dictation has no opinion about a coding agent.
+    assert d.hud.calls == []
+    assert d._bound_session is None
 
 
 @pytest.mark.asyncio
-async def test_one_way_still_shows_the_tool_and_the_permission_question():
+async def test_one_way_shows_neither_the_tool_nor_the_permission_question():
+    # Pure dictation: no Thinking pill, no amber question, and nothing armed
+    # to answer one with. In a real run these handlers are never even
+    # registered, because one-way starts no hook server at all.
     d = _one_way()
 
     await d._on_tool(
@@ -1421,23 +1438,29 @@ async def test_one_way_still_shows_the_tool_and_the_permission_question():
             "message": "Claude wants to run rm -rf build.",
         }
     )
+    await d._on_permission_request(
+        {
+            "hook_event_name": "PermissionRequest",
+            "session_id": "A",
+            "tool_name": "shell",
+            "tool_input": {"command": "rm -rf build"},
+        }
+    )
 
-    assert d.hud.calls[0] == ("thinking", "Thinking", "Bash: pytest -q")
-    assert d.hud.calls[-1] == ("permission", "Claude wants to run rm -rf build.", "")
-    # And the answer is armed, because it is a keystroke and not speech.
-    assert d._permission_session == "A"
+    assert d.hud.calls == []
+    assert d._permission_session is None
 
 
 @pytest.mark.asyncio
-async def test_one_way_answers_a_permission_prompt_by_voice():
-    d = _one_way(1, ["go ahead"])
-    d._permission_session = "s1"
+async def test_one_way_starts_no_hook_server_and_registers_no_handlers():
+    # The whole promise in one assertion: there is no server object, so there
+    # is nothing to bind a port, write a token file, or hand a hook event to.
+    cfg = Config()
+    cfg.talk_back = False
+    assert Daemon(cfg, text_mode=True).server is None
 
-    reopen = await d._handle_utterance("go ahead")
-
-    assert d.bridge.keys == [("Enter",)]
-    assert d.bridge.explicit == [True]
-    assert reopen is False
+    cfg.talk_back = True
+    assert Daemon(cfg, text_mode=True).server is not None
 
 
 @pytest.mark.asyncio
@@ -1461,3 +1484,251 @@ async def test_one_way_barge_in_is_inert():
     await d._listen_session(d.recorder.begin(), until_silence=False)
 
     assert d.bridge.injected == [("add a login test ", False)]
+
+
+# --------------------------------------------------- cleanup on every paste
+#
+# "the dictation itself without the cleanups is not that good, we have to be
+# professional." So cleanup mode is "always" out of the box, and "always" has
+# to mean every way a dictation can start.
+
+
+class FakeCleaner:
+    """The tuned cleanup model, minus the model."""
+
+    def __init__(self, reply=None, boom=None):
+        self.seen = []
+        self.reply = reply
+        self.boom = boom
+
+    async def clean(self, text, deadline_s):
+        self.seen.append((text, deadline_s))
+        if self.boom is not None:
+            raise self.boom
+        return self.reply if self.reply is not None else text
+
+
+def _clean_daemon(utterances, texts, cleaner=None):
+    d = _daemon(utterances, texts)
+    d.cfg.cleanup.mode = "always"
+    d.cleaner = cleaner or FakeCleaner("Add a login test.")
+    return d
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "said, injected",
+    [
+        # A hold, or a "type" trigger: both arrive as a plain dictation.
+        ("add a login test", "Add a login test. "),
+        # The spoken "type ..." command, which used to skip cleanup entirely.
+        ("type add a login test", "Add a login test."),
+        # And a dictation that ends by asking to be sent.
+        ("add a login test send it", "Add a login test."),
+    ],
+)
+async def test_cleanup_always_runs_before_the_paste(said, injected):
+    d = _clean_daemon(1, [said])
+
+    await d._handle_utterance(said)
+
+    assert d.cleaner.seen, f"the cleaner never saw {said!r}"
+    assert d.bridge.injected[0][0] == injected
+
+
+@pytest.mark.asyncio
+async def test_cleanup_runs_on_an_awake_follow_up_too():
+    d = _awake_daemon(2, ["add a login test", "and a logout test as well"])
+    d.cfg.cleanup.mode = "always"
+    d.cleaner = FakeCleaner()
+
+    await d._listen_session(d.recorder.begin(), until_silence=False)
+
+    assert [text for text, _deadline in d.cleaner.seen][:2] == [
+        "Add a login test",
+        "And a logout test as well",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_is_bounded_by_the_configured_deadline():
+    d = _clean_daemon(1, ["add a login test"])
+    d.cfg.cleanup.deadline_s = 1.25
+
+    await d._handle_utterance("add a login test")
+
+    assert d.cleaner.seen[0][1] == 1.25
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_failure_pastes_the_words_anyway():
+    # The model is missing, or it hung, or it raised. Whatever the user said
+    # still has to reach the box: cleanup is polish, never a gate.
+    d = _clean_daemon(1, ["add a login test"], FakeCleaner(boom=RuntimeError("no model")))
+
+    reopen = await d._handle_utterance("add a login test")
+
+    assert d.bridge.injected == [("Add a login test ", False)]
+    assert d._pending_paste is True
+    assert reopen is True
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_that_never_returns_still_pastes():
+    class Hangs:
+        async def clean(self, text, deadline_s):
+            await asyncio.sleep(30)
+            return "never"
+
+    d = _clean_daemon(1, ["add a login test"], Hangs())
+    d.cfg.cleanup.deadline_s = 0.02
+
+    await d._handle_utterance("add a login test")
+
+    assert d.bridge.injected == [("Add a login test ", False)]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_off_leaves_the_words_exactly_as_dictated():
+    d = _daemon(1, ["add a login test"])   # the fixture turns cleanup off
+    d.cleaner = FakeCleaner("SHOULD NEVER BE USED")
+
+    await d._handle_utterance("add a login test")
+
+    assert d.cleaner.seen == []
+    assert d.bridge.injected == [("add a login test ", False)]
+
+
+# ------------------------------------------------- what may open the pill
+#
+# "if the person wants to type again they say type, the pill waits and makes a
+# sound, for like five seconds." Three things open the pill and nothing else
+# does: a trigger word, the key, and a question Bol asked out loud.
+
+
+class SessionRecorder(FakeRecorder):
+    """Keeps the sessions it was handed, so a test can read their timings."""
+
+    def __init__(self, utterance_count, end_reason=""):
+        super().__init__(utterance_count, end_reason)
+        self.sessions = []
+
+    def begin(self):
+        session = super().begin()
+        self.sessions.append(session)
+        return session
+
+
+@pytest.fixture
+def cues(monkeypatch):
+    """Every cue Bol played, in order, without a speaker."""
+    played = []
+
+    async def fake_cue(name):
+        played.append(name)
+
+    monkeypatch.setattr(daemon_mod, "play_cue", fake_cue)
+    return played
+
+
+@pytest.mark.asyncio
+async def test_the_key_shows_a_listening_pill_and_plays_a_cue(cues):
+    d = _daemon(1, ["add a login test"])
+    d.cfg.ui.sounds = True
+
+    d._hotkey_pressed()
+    assert d.hud.calls[0] == ("listening", "Listening", "")
+
+    await asyncio.sleep(0.05)
+    assert cues[0] == "listen"
+
+
+@pytest.mark.asyncio
+async def test_saying_type_shows_a_listening_pill_and_plays_a_cue(cues):
+    d = _daemon(1, ["add a login test"])
+    d.cfg.ui.sounds = True
+    d.wake = FakeWake()
+
+    d._wake_detected(0.6, "type")
+    assert d.hud.calls[0] == ("listening", "Listening", "")
+
+    await asyncio.sleep(0.05)
+    assert cues[0] == "listen"
+
+
+@pytest.mark.asyncio
+async def test_a_trigger_word_waits_speak_window_ms_and_then_hides():
+    # Nothing said inside the window: the pill goes away and stays away.
+    d = _daemon(0, [])
+    d.recorder = SessionRecorder(0)
+    d.wake = FakeWake()
+
+    d._wake_detected(0.6, "type")
+    await asyncio.sleep(0.05)
+
+    assert d.recorder.sessions[0].window_ms == d.cfg.wake.speak_window_ms == 5000
+    assert d.recorder.sessions[0].silence_ms == d.cfg.wake.pause_ms == 2000
+    assert d.hud.states == ["listening", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_room_noise_never_opens_the_pill():
+    # The regression this exists for: with a rolling awake window, speech in
+    # the room kept reopening the microphone and the pill "came back again
+    # and again". awake_s is 0 now, so a listen that hears nothing is the end
+    # of it, and a capture nobody started paints nothing.
+    d = _daemon(0, [])
+    d.wake = FakeWake()
+
+    assert d.cfg.wake.awake_s == 0.0
+    assert d._awake() is False
+    assert d._reopens(daemon_mod.QUIET) is False
+
+    await d._capture_and_handle(d.recorder.begin(), until_silence=True)
+
+    assert d.hud.states == ["idle"]
+    assert "listening" not in d.hud.states
+
+
+# ------------------------------------------ the one window after Bol speaks
+
+
+@pytest.mark.asyncio
+async def test_a_spoken_summary_opens_the_microphone_exactly_once():
+    d = _hook_daemon()
+    d.recorder = SessionRecorder(4)
+    d.transcriber = FakeTranscriber(["and now add a logout test", "unheard"])
+    # Even with the awake window deliberately switched back on, the window
+    # after Bol speaks is one window and not a rolling one.
+    d.cfg.wake.awake_s = 60.0
+    d.wake = FakeWake()
+
+    await d._on_stop(_stop("A"))
+
+    assert d.recorder.calls == [True]
+    assert d.recorder.sessions[0].window_ms == d.cfg.wake.speak_window_ms
+    assert d.bridge.injected == [("and now add a logout test ", False)]
+
+
+@pytest.mark.asyncio
+async def test_a_summary_nobody_answers_leaves_a_blank_screen():
+    d = _hook_daemon()
+
+    await d._on_stop(_stop("A"))
+
+    assert d.recorder.calls == [True]      # one window ...
+    assert d.hud.states[-1] == "idle"      # ... and then nothing on screen
+    assert d.bridge.injected == []
+
+
+@pytest.mark.asyncio
+async def test_one_way_opens_no_window_after_anything():
+    # There is no summary in one-way, so there is nothing to answer and the
+    # microphone is never opened on Bol's own say-so.
+    d = _one_way(2, ["never heard"])
+
+    await d._on_stop(_stop("A"))
+    await d._follow_up_listen()
+
+    assert d.recorder.calls == []
+    assert d.hud.calls == []

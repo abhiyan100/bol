@@ -342,3 +342,125 @@ def test_validate_rejects_a_quoted_anywhere():
     message = str(err.value)
     assert "[bridge] anywhere" in message
     assert "true or false" in message
+
+
+# ---------------------------------------------- what a fresh install now gets
+#
+# Three defaults changed together, and all three came from the same feedback:
+# two seconds instead of three, a separate window for "start talking", and
+# cleanup on every dictation because raw dictation is not professional.
+
+
+def test_the_pause_is_two_seconds_and_the_speak_window_is_five():
+    cfg = Config()
+    assert cfg.wake.pause_ms == 2000
+    assert cfg.wake.speak_window_ms == 5000
+    # Off: with the awake window open, room noise kept reopening the mic.
+    assert cfg.wake.awake_s == 0.0
+
+
+def test_cleanup_runs_on_every_dictation_by_default():
+    cfg = Config()
+    assert cfg.cleanup.mode == "always"
+    assert cfg.cleanup.model == "abhiyan10/bol-cleanup-350m-4bit"
+
+
+def test_setup_has_not_been_answered_until_the_wizard_answers_it():
+    # "auto" and [] are different answers: one is nobody having chosen, the
+    # other is somebody choosing no coding agent at all.
+    assert Config().setup.agents == "auto"
+
+
+def test_the_default_file_matches_the_dataclasses_everywhere():
+    # The one that catches a default changed in exactly one of the two places.
+    data = tomllib.loads(DEFAULT_CONFIG_TOML)
+    cfg = Config()
+    for section in ("wake", "cleanup", "setup", "tts", "llm", "summarizer", "server"):
+        for key, value in data.get(section, {}).items():
+            assert getattr(getattr(cfg, section), key) == value, f"{section}.{key}"
+
+
+def test_load_config_reads_the_setup_section(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[setup]\nagents = ["codex"]\n')
+    assert load_config(path).setup.agents == ["codex"]
+
+    path.write_text("[setup]\nagents = []\n")
+    assert load_config(path).setup.agents == []
+
+
+def test_validate_rejects_a_speak_window_of_zero():
+    cfg = Config()
+    cfg.wake.speak_window_ms = 0
+
+    with pytest.raises(ValueError) as err:
+        validate_config(cfg)
+
+    assert "speak_window_ms" in str(err.value)
+    assert "above 0" in str(err.value)
+
+
+# ------------------------------------------ writing the setup wizard's answers
+
+
+def test_the_template_keeps_its_comments_when_values_are_substituted():
+    from bol.config import render_default_config
+
+    out = render_default_config({
+        (None, "talk_back"): True,
+        ("cleanup", "mode"): "off",
+        ("audio", "input_device"): "Shure MV7",
+        ("setup", "agents"): ["claude", "codex"],
+    })
+
+    data = tomllib.loads(out)
+    assert data["talk_back"] is True
+    assert data["cleanup"]["mode"] == "off"
+    assert data["audio"]["input_device"] == "Shure MV7"
+    assert data["setup"]["agents"] == ["claude", "codex"]
+    # A key the template ships commented out is uncommented, and every line
+    # keeps the documentation that is the reason the file exists.
+    assert "# mic name substring or index" in out
+    assert "# the on-screen pill that shows what Bol is doing" in out
+    assert removed_keys.__module__  # sanity: the module imported cleanly
+
+
+def test_substituting_nothing_is_the_template_itself():
+    from bol.config import render_default_config
+
+    assert render_default_config({}) == DEFAULT_CONFIG_TOML
+
+
+def test_writing_a_new_config_keeps_the_comments(tmp_path):
+    from bol.config import write_config_values
+
+    path, rewritten = write_config_values(
+        {(None, "talk_back"): True}, tmp_path / "config.toml"
+    )
+
+    assert rewritten is False
+    assert "# Bol configuration" in path.read_text()
+    assert load_config(path).talk_back is True
+
+
+def test_writing_over_an_existing_config_changes_only_those_keys(tmp_path):
+    from bol.config import write_config_values
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '# a comment nobody promised to keep\n'
+        'talk_back = false\n[hotkey]\nkey = "f13"\n'
+        '[vocabulary]\nwords = ["Abhiyan"]\n'
+    )
+
+    written, rewritten = write_config_values(
+        {(None, "talk_back"): True, ("setup", "agents"): []}, path
+    )
+
+    assert rewritten is True
+    cfg = load_config(written)
+    assert cfg.talk_back is True
+    assert cfg.setup.agents == []
+    assert cfg.hotkey.key == "f13"           # untouched
+    assert cfg.vocabulary.words == ["Abhiyan"]
+    validate_config(cfg)

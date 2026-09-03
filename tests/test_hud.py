@@ -68,7 +68,6 @@ def test_the_documented_motion_for_each_state():
     assert dots_for("sending").motion == "all"
     assert dots_for("permission").motion == "blink"
     assert dots_for("error").motion == "steady"
-    assert dots_for("awake").motion == "dim"
 
 
 def test_colour_is_spent_only_where_the_user_has_to_do_something():
@@ -79,10 +78,13 @@ def test_colour_is_spent_only_where_the_user_has_to_do_something():
     assert dots_for("error").color == "red"
 
 
-def test_the_awake_window_dims_the_mark_rather_than_lighting_a_dot():
-    awake = dots_for("awake")
-    assert awake.icon < 1.0
-    assert dot_alphas(awake) == (DIM_ALPHA,) * DOT_COUNT
+def test_there_is_no_ready_state_on_the_screen():
+    # The awake pill is gone. It stood for a window in which speech needed no
+    # trigger word, that window is off by default now, and a capsule that
+    # sits there between sentences is one nobody stops seeing.
+    assert "awake" not in STATES
+    assert dots_for("awake") is dots_for("dancing")
+    assert label_for("awake") == ""
 
 
 def test_a_paste_hint_is_a_sending_that_carries_its_own_hold():
@@ -101,7 +103,7 @@ def test_only_the_moving_patterns_ask_for_a_clock():
         assert animated(dots_for(state)) is True, state
     # A meter the daemon drives, an error, a paste hint and an idle pill all
     # sit still: none of them should wake the CPU thirty times a second.
-    for state in ("idle", "awake", "listening", "sending", "error"):
+    for state in ("idle", "listening", "sending", "error"):
         assert animated(dots_for(state)) is False, state
     assert animated(PASTED) is False
 

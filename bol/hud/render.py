@@ -22,7 +22,6 @@ from dataclasses import dataclass
 # on a line nobody can explain.
 STATES = (
     "idle",
-    "awake",
     "listening",
     "finalizing",
     "sending",
@@ -83,11 +82,11 @@ HIDDEN = Dots("hidden", icon=0.0)
 # Bol is doing under its own steam, and a colour only where the user has to
 # do something (answer a prompt, read an error, say "send it").
 DOTS = {
+    # Nothing on screen unless Bol is doing something the user started. There
+    # is no "ready" state and there deliberately is not one: a capsule that
+    # sits there between sentences is a capsule nobody stops seeing, and the
+    # awake window it used to advertise is off by default now.
     "idle": HIDDEN,
-    # Wake mode's awake window: nothing is being recorded, but the next thing
-    # said needs no wake phrase. The pill is up and the mark is dimmed, which
-    # is the difference between "ready" and "working".
-    "awake": Dots("dim", icon=0.6),
     "listening": Dots("level"),
     "finalizing": Dots("sweep", period=0.4),
     "thinking": Dots("bounce", period=0.9),
@@ -97,11 +96,12 @@ DOTS = {
     "error": Dots("steady", color="red"),
 }
 
-# The hint after a paste, which is after every paste: nothing is ever sent by
-# itself. It rides in on "sending" with a hold of its own (see hold_for):
-# "Sent" is one word that takes itself down, and a line the user has to act on
-# is neither. Dim blue rather than white, so a pill that is waiting on the
-# user never looks like one that is finished.
+# A line the user has to act on rather than a receipt: the pause hint, which
+# rides in on "sending" with a hold of its own (see hold_for). "Sent" is one
+# word that takes itself down, and a sentence somebody has to read is neither.
+# Dim blue rather than white, so a pill that is waiting on the user never
+# looks like one that is finished. (A paste no longer uses this: the pill goes
+# away the moment the words land.)
 PASTED = Dots("all", color="blue", alpha=0.60)
 
 # Transient states take themselves off the screen after this long, so the
@@ -113,7 +113,6 @@ HOLD_S = {"sending": 1.0, "error": 3.0}
 # Used when the caller sends a state with no text of its own. Only reachable
 # with [ui] text = true; the dots say all of this on their own.
 DEFAULTS = {
-    "awake": "Awake",
     "listening": "Listening",
     "finalizing": "Finalizing",
     "sending": "Sent",

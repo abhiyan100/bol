@@ -313,6 +313,10 @@ class FakeHud:
 def _daemon(talk_back=True):
     cfg = Config()
     cfg.ui.sounds = False
+    # Cleanup is "always" by default; these tests are about hooks and would
+    # otherwise load a 195 MB model on every utterance.
+    cfg.cleanup.mode = "off"
+    cfg.cleanup.model = ""
     cfg.talk_back = talk_back
     d = Daemon(cfg, text_mode=True, clock=lambda: 0.0)
     d.bridge = FakeBridge()
@@ -372,7 +376,9 @@ async def test_a_codex_permission_request_arms_go_ahead():
 
 
 @pytest.mark.asyncio
-async def test_one_way_still_arms_a_codex_permission_request():
+async def test_one_way_ignores_a_codex_permission_request():
+    # Pure dictation says nothing about a coding agent, Codex included: no
+    # pill, nothing armed, and in a real run no hook server to hear it on.
     d = _daemon(talk_back=False)
     await d._on_permission_request(
         {
@@ -382,17 +388,22 @@ async def test_one_way_still_arms_a_codex_permission_request():
             "tool_input": {"command": "*** Begin Patch\n*** Add File: a.py\n"},
         }
     )
-    assert d._permission_session == "c1"
-    assert d.hud.calls[-1] == ("permission", "Codex wants to run: a.py", "")
+    assert d._permission_session is None
+    assert d.hud.calls == []
 
 
 @pytest.mark.asyncio
 async def test_the_mode_line_follows_the_agent_being_narrated():
-    d = _daemon(talk_back=False)
-    # Before any session speaks, the default is the one most people run.
-    assert "hear what Claude did" in d.mode_line()
+    # One-way never learns an agent's name (it hears no hooks at all), so the
+    # line it prints is the fixed invitation. Two-way is where the name comes
+    # from, and the mode line follows whoever spoke.
+    assert (
+        _daemon(talk_back=False).mode_line()
+        == "bol: one-way (dictation). Add --talk-back to hear what Claude did."
+    )
+    d = _daemon()
     await d._on_stop(_codex_stop())
-    assert "hear what Codex did" in d.mode_line()
+    assert d.agent_name == "Codex"
 
 
 @pytest.mark.asyncio
@@ -473,9 +484,15 @@ def _on_path(monkeypatch, *names):
     )
 
 
+def _two_way():
+    cfg = Config()
+    cfg.talk_back = True
+    return cfg
+
+
 def test_setup_wires_every_agent_on_path(wired, monkeypatch, capsys):
     _on_path(monkeypatch, "claude", "codex")
-    cli._setup_hooks(Config())
+    cli._setup_hooks(_two_way())
     assert [agent for agent, _scope in wired] == ["claude", "codex"]
     out = capsys.readouterr().out
     assert installer.CODEX_TRUST_NOTE in out
@@ -485,20 +502,32 @@ def test_setup_wires_every_agent_on_path(wired, monkeypatch, capsys):
 
 def test_setup_wires_only_the_agent_that_is_installed(wired, monkeypatch, capsys):
     _on_path(monkeypatch, "codex")
-    cli._setup_hooks(Config())
+    cli._setup_hooks(_two_way())
     assert [agent for agent, _scope in wired] == ["codex"]
     out = capsys.readouterr().out
     assert "hooks installed for Codex CLI." in out
     assert "Claude Code" not in out
 
 
-def test_setup_falls_back_to_claude_when_neither_is_installed(
+def test_setup_writes_no_hooks_when_there_is_no_agent_to_wire(
     wired, monkeypatch, capsys
 ):
+    # Nothing on PATH is the same answer as "anything, no coding agent": Bol
+    # dictates, and nobody's settings file is opened.
     _on_path(monkeypatch)
+    cli._setup_hooks(_two_way())
+    assert wired == []
+    assert cli.NO_HOOKS_LINE in capsys.readouterr().out
+
+
+def test_setup_writes_no_hooks_for_dictation_only(wired, monkeypatch, capsys):
+    # Both agents installed, talk-back off: still no settings file touched.
+    _on_path(monkeypatch, "claude", "codex")
     cli._setup_hooks(Config())
-    assert [agent for agent, _scope in wired] == ["claude"]
-    assert installer.CODEX_TRUST_NOTE not in capsys.readouterr().out
+    assert wired == []
+    out = capsys.readouterr().out
+    assert cli.NO_HOOKS_LINE in out
+    assert "bol hook install" in out
 
 
 def test_hook_install_agent_codex_prints_the_trust_note(wired, capsys):
@@ -537,6 +566,6 @@ def test_doctor_reports_hooks_per_agent(monkeypatch):
     monkeypatch.setattr(cli, "_url", lambda cfg: f"{URL}?token=t")
     monkeypatch.setattr(cli.installer, "installed", lambda url, agent="claude": True)
     _on_path(monkeypatch, "claude", "codex")
-    labels = [label for _status, label, _hint in cli.probe_wiring(Config())]
+    labels = [label for _status, label, _hint in cli.probe_wiring(_two_way())]
     assert "hooks installed for Claude Code (user scope)" in labels
     assert "hooks installed for Codex CLI (user scope)" in labels
