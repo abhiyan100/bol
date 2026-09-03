@@ -1768,7 +1768,7 @@ async def test_a_paste_opens_a_command_window_that_hears_send_it():
     # Two recordings: the dictation, then the invisible command listen.
     assert d.recorder.calls == [True, True]
     # The window drew nothing: after the paste the pill only went idle.
-    assert "listening" not in d.hud.states()[1:]
+    assert "listening" not in d.hud.states[1:]
 
 
 @pytest.mark.asyncio
