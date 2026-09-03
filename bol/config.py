@@ -126,6 +126,9 @@ class WakeConfig:
     # pill goes away again, so a trigger heard across the room costs five
     # seconds of a dark capsule and nothing else.
     speak_window_ms: int = 5000
+    # After a paste, how long Bol listens for a bare command like "send it" or
+    # "scratch that", with nothing on screen. 0 = the keyword ear alone.
+    command_window_s: float = 10.0
     # After a trigger word or a hold, how long follow-up speech needs no
     # trigger. 0 = only trigger words and the key ever start listening
     # (the default; room noise cannot wake the pill). 60 = a free minute.
@@ -388,6 +391,16 @@ def validate_wake(wake: WakeConfig) -> None:
             "pause ends a dictation and pastes it."
         )
     try:
+        command_window = float(wake.command_window_s)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"[wake] command_window_s must be a number, not {wake.command_window_s!r}."
+        ) from None
+    if command_window < 0:
+        raise ValueError(
+            f"[wake] command_window_s must be 0 or more, not {command_window}."
+        )
+    try:
         speak_window = float(wake.speak_window_ms)
     except (TypeError, ValueError):
         raise ValueError(
@@ -447,6 +460,7 @@ cancel_phrases = ["scratch that", "close"]   # wipes a pending paste
 sleep_phrases = ["stop listening"] # pause Bol; press the hotkey to resume
 pause_ms = 2000        # a pause this long ends a "type" dictation and pastes it
 speak_window_ms = 5000 # how long the pill waits for you to start speaking after a
+command_window_s = 10  # after a paste, seconds Bol listens for "send it" or "scratch that", nothing on screen; 0 = keyword ear only
                        # trigger word before it gives up and goes away again
 threshold = 0.12       # trigger probability; lower hears more, including the TV
 # type_threshold = 0.0 # "type" only; 0 = use threshold. Raising it costs the real

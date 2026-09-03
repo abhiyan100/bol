@@ -63,7 +63,7 @@ nothing sent until you say so.
 |---|---|
 | Say **"type"**, talk, pause 2 s | pastes what you said, no Enter |
 | **Hold right Option**, talk, release | same, for noisy rooms |
-| Say **"send it"** (or "send", "enter") | presses Enter, wherever you are |
+| Say **"send it"** (or "send", "enter") | presses Enter, wherever you are; after a paste Bol listens ten seconds for it with nothing on screen |
 | Say **"scratch that"** | clears what Bol pasted |
 | Say **"stop listening"** | pauses the ear; press the key to resume |
 | Say **"hey Bol ..."** | the conversation flow, with talk-back on |

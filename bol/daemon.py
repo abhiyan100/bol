@@ -241,6 +241,13 @@ class Daemon:
         # it; without one there is nothing to send, and "send it" said at the
         # television must not press Enter on whatever the user typed by hand.
         self._pending_paste = False
+        # The command window: after a paste, one invisible listen for a bare
+        # "send it" or "scratch that", so the keyword ear is not the only way
+        # to finish a dictation. Yielded to any trigger word or key press.
+        self._command_session = None
+        self._command_task = None
+        self._command_deadline = 0.0
+        self._command_yield = False
         # The on-screen pill. Inert until start(), and every call on it is a
         # no-op when the child is missing.
         self.hud = Hud(
@@ -385,12 +392,10 @@ class Daemon:
         """
         if self.transcriber is None:
             return
+        # Nothing on screen for this: the pill first appears on a trigger
+        # word, a key press, or a talk-back question, never at startup.
         print("bol: warming up speech model ...")
-        self.hud.set("thinking", "Loading speech model")
-        try:
-            await self.transcriber.warmup()
-        finally:
-            self.hud.set("idle")
+        await self.transcriber.warmup()
 
     async def _open_microphone(self) -> None:
         """Build the input stream before the key is armed.
@@ -484,7 +489,11 @@ class Daemon:
         if kind in (SEND, CANCEL, SLEEP):
             self._wake_command(kind, phrase)
             return
-        if self._listen_lock.locked() or self._pending_listen:
+        if self._command_session is not None:
+            # A command window has the mic; a trigger word takes it back, and
+            # the new listen queues on the lock the window is about to drop.
+            self._yield_command_window()
+        elif self._listen_lock.locked() or self._pending_listen:
             return
         # Debug, not info: a trigger word is a thing the user just said, and
         # narrating it back at them fills the terminal with lines nobody asked
@@ -526,6 +535,103 @@ class Daemon:
         if trigger == TYPE:
             session.silence_ms = int(self.cfg.wake.pause_ms)
         return session
+
+    # ---------------------------------------------------------- command window
+
+    def _arm_command_window(self) -> None:
+        """After a paste, listen for a bare command with nothing on screen.
+
+        The keyword ear is muted during every recording and then has to catch
+        a two-word phrase cold, in a real room, at a threshold tuned on
+        synthetic voices. It missed. So after a paste the full recognizer
+        listens too, invisibly: a bare "send it" or "scratch that" is acted
+        on, "type ..." starts the next dictation, anything else is ignored
+        and never pasted. Whichever path hears the command first wins; the
+        pending flag makes sure Enter is pressed once.
+        """
+        window = float(self.cfg.wake.command_window_s or 0)
+        if window <= 0 or self.transcriber is None or self.text_mode:
+            return
+        self._command_deadline = self._clock() + window
+        if self._command_task is not None and not self._command_task.done():
+            return  # already listening; the deadline above just moved
+        self._command_yield = False
+        task = asyncio.get_running_loop().create_task(self._command_window())
+        task.add_done_callback(_drain)
+        self._command_task = task
+
+    def _yield_command_window(self) -> None:
+        """A trigger word, a key press or a pause takes the mic back."""
+        if self._command_session is not None:
+            self._command_yield = True
+            self._command_session.request_stop("stop")
+
+    async def _command_window(self) -> None:
+        try:
+            while self._pending_paste and not self._asleep and not self._command_yield:
+                remaining = self._command_deadline - self._clock()
+                if remaining <= 0:
+                    log.debug("command window closed, nothing said")
+                    break
+                async with self._listen_lock:
+                    if not self._pending_paste or self._command_yield:
+                        break
+                    session = self.recorder.begin()
+                    session.until_silence = True
+                    session.window_ms = int(remaining * 1000)
+                    self._command_session = session
+                    try:
+                        audio = await self.recorder.record(session, until_silence=True)
+                    except Exception as exc:
+                        log.debug("command window: %s", exc)
+                        break
+                    finally:
+                        self._command_session = None
+                    if audio is None or self._command_yield:
+                        # Nobody spoke inside the window, or something else
+                        # took the mic. Either way this window is over.
+                        break
+                    try:
+                        text = await self.transcriber.transcribe(
+                            audio, self.cfg.audio.sample_rate
+                        )
+                    except Exception as exc:
+                        log.debug("command window: %s", exc)
+                        break
+                    verdict = await self._command_from_window(text)
+                if verdict == "stop":
+                    break
+        finally:
+            self._command_session = None
+            self._command_task = None
+
+    async def _command_from_window(self, text: str) -> str:
+        """What one utterance heard inside the command window means.
+
+        Returns "stop" when the window is done, "continue" to keep listening.
+        """
+        text = (text or "").strip()
+        if not text:
+            return "continue"
+        parsed = self.grammar.parse(text)
+        bare = parsed.action in (
+            Action.SEND, Action.DISCARD, Action.SLEEP, Action.INTERRUPT
+        ) and not parsed.text
+        if bare:
+            if parsed.action in (Action.SEND, Action.DISCARD) and not self._pending_paste:
+                return "stop"  # the keyword ear got there first
+            print(f"you: {text}")
+            await self._apply(parsed)
+            return "stop"
+        stripped = strip_wake_phrase(text, self._type_phrases)
+        if stripped and stripped != text:
+            # Began with a trigger word: the next dictation, and the paste it
+            # ends in arms a fresh window on its own.
+            print(f"you: {stripped}")
+            await self._handle_utterance(stripped)
+            return "stop" if not self._pending_paste else "continue"
+        log.debug("command window ignored: %r", text)
+        return "continue"
 
     def _wake_command(self, kind: str, phrase: str = "") -> None:
         """A trigger word that acts on text rather than starting a recording."""
@@ -584,6 +690,7 @@ class Daemon:
         when it was set cannot quietly switch the ear back on.
         """
         self._asleep = True
+        self._yield_command_window()
         # Or the next pause would reopen the mic Bol was just told to leave.
         self._awake_until = 0.0
         self._mute_wake()
@@ -716,7 +823,9 @@ class Daemon:
         self._ptt_session = session
         self._hush()  # barge-in over TTS
         # Barge-in over a recording that opened itself: it yields to the key,
-        # and the press waits for the mic instead of being dropped.
+        # and the press waits for the mic instead of being dropped. So does a
+        # command window.
+        self._yield_command_window()
         if self._active_session is not None and self._active_auto:
             self._active_session.request_stop()
         listen = asyncio.get_running_loop().create_task(
@@ -990,6 +1099,7 @@ class Daemon:
             # in front is now the way to finish it.
             log.debug("submit withheld: %s", exc)
             self._pending_paste = True
+            self._arm_command_window()
             await self._speak(
                 f"Typed it, but that window doesn't look like {self.agent_name}, "
                 "so I didn't press Enter."
@@ -1072,6 +1182,7 @@ class Daemon:
             self._pending_paste = True
             self._idle_pill()
             print("bol: pasted.")
+            self._arm_command_window()
             return True
         if action is Action.SEND:
             self._permission_session = None

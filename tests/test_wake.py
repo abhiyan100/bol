@@ -639,6 +639,9 @@ def _wake_daemon(
     cfg.talk_back = True
     cfg.wake.enabled = True
     cfg.wake.awake_s = awake_s
+    # These tests count recordings; the command window that follows a paste
+    # is covered in test_daemon_loop and would add one here.
+    cfg.wake.command_window_s = 0
     if commands:
         # Before the Daemon is built: the phrase table is read once, there.
         cfg.commands = commands

@@ -15,7 +15,7 @@ from bol import daemon as daemon_mod
 from bol.bridge.focused import SubmitBlocked
 from bol.config import Config
 from bol.daemon import Daemon
-from bol.wake import CANCEL, SEND
+from bol.wake import CANCEL, SEND, TYPE
 
 
 class FakeRecorder:
@@ -167,6 +167,9 @@ def _daemon(utterances, texts, talk_back=True, clock=None):
     # Two-way by default here: most of these tests assert on what Bol says,
     # and one-way has nothing to say. The one-way tests build their own.
     cfg.talk_back = talk_back
+    # The command window after a paste is its own feature with its own tests
+    # below; everywhere else a paste must stay a paste, not paste plus listen.
+    cfg.wake.command_window_s = 0
     d = Daemon(cfg, text_mode=False, clock=clock or Ticks(0.0))
     d.recorder = FakeRecorder(utterances)
     d.transcriber = FakeTranscriber(texts)
@@ -1006,15 +1009,15 @@ class SilentTranscriber(FakeTranscriber):
 
 
 @pytest.mark.asyncio
-async def test_the_pill_says_what_the_startup_wait_is_for():
-    # Cold, loading the speech model is the longest silence in a Bol
-    # startup. An unexplained one is exactly what the pill exists to end.
+async def test_the_startup_wait_puts_nothing_on_screen():
+    # The user's rule: at `bol run` only the microphone turns on. The pill
+    # first appears on a trigger word, a key press or a talk-back question.
     d = _daemon(0, [])
     d.transcriber = SilentTranscriber()
 
     await d._warm_speech_model()
 
-    assert d.hud.calls == [("thinking", "Loading speech model", ""), ("idle", "", "")]
+    assert d.hud.calls == []
     assert d.transcriber.warmups == 1
 
 
@@ -1026,7 +1029,7 @@ async def test_a_failed_warmup_does_not_leave_the_pill_loading_forever():
     with pytest.raises(RuntimeError):
         await d._warm_speech_model()
 
-    assert d.hud.states == ["thinking", "idle"]
+    assert d.hud.calls == []
 
 
 @pytest.mark.asyncio
@@ -1731,4 +1734,99 @@ async def test_one_way_opens_no_window_after_anything():
     await d._follow_up_listen()
 
     assert d.recorder.calls == []
+    assert d.hud.calls == []
+
+
+# ------------------------------------------------ the command window after a paste
+
+
+def _window_daemon(utterances, texts, window_s=10.0):
+    """One-way, no pill, wake ear faked: the daemon that types and then waits
+    for a bare command with nothing on screen."""
+    d = _daemon(utterances, texts, talk_back=False, clock=Ticks())
+    d.summarizer = None
+    d.wake = FakeWake()
+    d.cfg.wake.command_window_s = window_s
+    return d
+
+
+async def _window_done(d):
+    task = d._command_task
+    if task is not None:
+        await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_a_paste_opens_a_command_window_that_hears_send_it():
+    d = _window_daemon(2, ["add a login test", "Send it."])
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    await _window_done(d)
+    # A spoken send is an empty paste plus Enter, the way SEND always was.
+    assert d.bridge.injected == [("add a login test ", False), ("", True)]
+    assert d.bridge.explicit[-1] is True
+    assert d._pending_paste is False
+    # Two recordings: the dictation, then the invisible command listen.
+    assert d.recorder.calls == [True, True]
+    # The window drew nothing: after the paste the pill only went idle.
+    assert "listening" not in d.hud.states()[1:]
+
+
+@pytest.mark.asyncio
+async def test_keyword_and_window_together_press_enter_once():
+    d = _window_daemon(2, ["add a login test", "send it"])
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    # The keyword ear fires while the window is still recording the same words.
+    d._wake_command(SEND)
+    await _window_done(d)
+    assert d.bridge.keys == [("Enter",)]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_sentence_in_the_window_pastes_nothing():
+    d = _window_daemon(2, ["add a login test", "so anyway the weather is nice"])
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    await _window_done(d)
+    assert d.bridge.injected == [("add a login test ", False)]
+    assert d.bridge.keys == []
+    assert d._pending_paste is True  # still waiting for a real "send it"
+
+
+@pytest.mark.asyncio
+async def test_type_inside_the_window_starts_the_next_dictation():
+    d = _window_daemon(3, ["add a login test", "type and run pytest", "send it"])
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    await _window_done(d)
+    assert d.bridge.injected == [
+        ("add a login test ", False),
+        ("and run pytest ", False),
+        ("", True),
+    ]
+    assert d._pending_paste is False
+
+
+@pytest.mark.asyncio
+async def test_the_window_times_out_silently():
+    # One utterance only: the command listen gets None back, as the recorder
+    # does when nobody speaks before the window closes.
+    d = _window_daemon(1, ["add a login test"])
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    await _window_done(d)
+    assert d.bridge.keys == []
+    assert d._command_task is None
+    assert d._pending_paste is True
+
+
+@pytest.mark.asyncio
+async def test_command_window_zero_means_keyword_ear_only():
+    d = _window_daemon(2, ["add a login test", "send it"], window_s=0)
+    await d._listen_session(d._begin(TYPE), until_silence=True, trigger=TYPE)
+    assert d._command_task is None
+    assert d.recorder.calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_warming_the_speech_model_draws_nothing():
+    d = _daemon(0, [], talk_back=False)
+    d.summarizer = None
+    await d._warm_speech_model()
     assert d.hud.calls == []
