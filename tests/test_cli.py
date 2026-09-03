@@ -618,8 +618,10 @@ def setup_run(monkeypatch, tmp_path):
         monkeypatch.setattr(cli, name, lambda _cfg: [])
 
     downloaded: list[tuple[str, str]] = []
+    # wanted_models, not installed_models: this fixture is about the user's
+    # choices, and the CI runner has no speech extras installed.
     monkeypatch.setattr(cli, "_setup_models", lambda cfg: downloaded.extend(
-        cli.installed_models(cfg)
+        cli.wanted_models(cfg)
     ) or True)
     wired: list[str] = []
     monkeypatch.setattr(
