@@ -79,6 +79,16 @@ def deterministic_clean(text: str) -> str:
 # phrase -> spelling. Matched case-insensitively on whole words, with any
 # amount of whitespace between the parts of a phrase.
 TOOL_NAMES = (
+    # The wake phrase, said mid-sentence. Two words, so there is no other
+    # thing "hey ball" can mean; the one-word lookalikes ("ball", "babel")
+    # stay session-gated below because they are real words on their own.
+    ("hey ball", "hey Bol"),
+    ("hey bowl", "hey Bol"),
+    ("hey bull", "hey Bol"),
+    ("hey bole", "hey Bol"),
+    ("hayball", "hey Bol"),
+    ("heyball", "hey Bol"),
+    ("haybol", "hey Bol"),
     ("claude code", "Claude Code"),
     ("cloud code", "Claude Code"),
     ("jason file", "JSON file"),

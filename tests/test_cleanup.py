@@ -377,3 +377,19 @@ async def test_clean_transcript_takes_the_session_words_too():
     # Spelled before the model sees it, so there is nothing for it to undo.
     assert cleaner.calls == ["The Bol daemon pastes it"]
     assert out == "The Bol daemon pastes it [tuned]"
+
+
+@pytest.mark.parametrize(
+    "spoken, expected",
+    [
+        ("I'm testing the hayball command", "I'm testing the hey Bol command"),
+        ("it still says hey ball here", "it still says hey Bol here"),
+        ("say hey bowl and talk", "say hey Bol and talk"),
+        ("Hey bull, add a test", "hey Bol, add a test"),
+        # One word on its own is a real word until the session says otherwise.
+        ("put it in a bowl", "put it in a bowl"),
+        ("the babel config", "the babel config"),
+    ],
+)
+def test_the_wake_phrase_is_spelled_right_in_any_session(spoken, expected):
+    assert apply_vocabulary(spoken) == expected
