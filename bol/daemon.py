@@ -60,7 +60,7 @@ from .cleanup import (
 from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker, display_name
-from .hotkey import HotkeyListener, MouseListener
+from .hotkey import HotkeyListener
 from .hud import Hud
 from .llm import LLMEngine
 from .speak import build_speaker, play_cue
@@ -224,7 +224,6 @@ class Daemon:
         self.transcriber = None if text_mode else build_transcriber(cfg)
         self.hotkey: HotkeyListener | None = None
         # Watches for the click that means "not that". Optional, like wake.
-        self.mouse: MouseListener | None = None
         # The recording a trigger word started, while it is running: the one
         # a click or an app switch is allowed to cancel.
         self._wake_session = None
@@ -365,21 +364,11 @@ class Daemon:
             self.cfg.hotkey, self._hotkey_pressed, self._hotkey_released
         )
         self.hotkey.start()
-        if self.wake is not None:
-            # Started after the hotkey, and only when a trigger word can open
-            # the microphone on its own: it exists to cancel those recordings
-            # and has nothing to watch otherwise. Same permission, so it adds
-            # no prompt, and it never raises.
-            mouse = MouseListener(self._clicked)
-            if mouse.start():
-                self.mouse = mouse
         print(self._start_line())
         try:
             await asyncio.Event().wait()
         finally:
             self.hotkey.stop()
-            if self.mouse is not None:
-                self.mouse.stop()
             await self._stop_wake()
             await self.hud.stop()
             await self.recorder.close()
@@ -763,16 +752,6 @@ class Daemon:
         print("bol: paused. Press the key to resume.")
 
     # ------------------------------------------------------------ cancelling
-
-    def _clicked(self) -> None:
-        """A mouse button went down somewhere. On the event loop.
-
-        Only ever cancels a recording a trigger word started. A hotkey
-        recording is one the user is holding a key for, and clicking while
-        dictating (to put the cursor somewhere, to bring a window forward) is
-        a thing people do on purpose.
-        """
-        self._cancel_wake_recording("click")
 
     def _cancel_wake_recording(self, why: str, detail: str = "") -> None:
         """Stop a recording nobody asked for, and remember the short reason.

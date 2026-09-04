@@ -229,7 +229,7 @@ model itself only ever sees your raw sentence, so nothing slows down.
 - **Microphone**: prompted on first run, granted to your terminal app. The
   orange indicator stays on while Bol runs; `[wake] enabled = false` closes
   the mic between key presses.
-- **Input Monitoring**: the hotkey and the click-to-cancel need it.
+- **Input Monitoring**: the hotkey needs it.
 - **Automation**: macOS asks once when Bol first pastes via System Events.
 
 ## Contributing

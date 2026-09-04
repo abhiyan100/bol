@@ -1914,53 +1914,6 @@ async def test_the_resume_line_is_printed_once(capsys):
 # ------------------------------------------------------------- cancelling
 
 
-async def test_a_click_cancels_a_recording_a_trigger_word_started():
-    clock = Clock()
-    d = _wake_daemon(0, [], clock, awake_s=60.0)
-    d.recorder = BlockingRecorder()
-
-    d._wake_detected(0.6, "type")
-    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
-    session = d._active_session
-    d._clicked()
-    await asyncio.sleep(0.05)
-
-    assert session.end_reason == "cancelled"
-    assert d.bridge.injected == []
-    assert d._pending_paste is False
-    # The window that would have reopened the microphone is shut with it.
-    assert d._awake() is False
-    assert d.hud.states[-1] == "idle"
-
-
-async def test_a_click_leaves_a_hotkey_recording_alone():
-    # Clicking to put the cursor somewhere while dictating is a thing people
-    # do on purpose, and the key in their other hand is the way out.
-    clock = Clock()
-    d = _wake_daemon(0, [], clock)
-    d.recorder = BlockingRecorder()
-
-    d._hotkey_pressed()
-    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
-    session = d._active_session
-    d._clicked()
-    await asyncio.sleep(0.02)
-
-    assert session.stopped is False
-    assert d._wake_session is None
-    session.request_stop()
-    await asyncio.sleep(0.05)
-
-
-async def test_a_click_with_no_recording_running_does_nothing():
-    clock = Clock()
-    d = _wake_daemon(0, [], clock)
-
-    d._clicked()
-
-    assert d.recorder.calls == []
-
-
 async def test_another_app_coming_forward_cancels_a_trigger_recording(monkeypatch):
     monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
     seen = ["com.apple.Terminal", "com.apple.Terminal", "com.google.Chrome"]

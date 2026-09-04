@@ -393,3 +393,49 @@ async def test_clean_transcript_takes_the_session_words_too():
 )
 def test_the_wake_phrase_is_spelled_right_in_any_session(spoken, expected):
     assert apply_vocabulary(spoken) == expected
+
+
+# ------------------------------------------------ long dictations keep their tail
+
+from bol.cleanup import TunedCleaner, _tail_kept, split_for_cleanup
+
+
+def test_short_text_is_one_group_and_long_text_splits_on_sentences():
+    assert split_for_cleanup("fix the parser and run pytest") == ["fix the parser and run pytest"]
+    long = " ".join(f"Sentence number {i} has exactly six words." for i in range(12))
+    groups = split_for_cleanup(long, limit=20)
+    assert len(groups) >= 3
+    assert " ".join(groups).split() == long.split()  # nothing lost, nothing reordered
+    assert all(len(g.split()) <= 24 for g in groups)
+
+
+def test_a_rewrite_that_drops_the_last_clause_is_caught():
+    raw = "add a login test for the parser and then run the whole suite"
+    assert _tail_kept(raw, "Add a login test for the parser and then run the whole suite.")
+    assert not _tail_kept(raw, "Add a login test for the parser.")
+    assert _tail_kept("um so yeah", "So yeah.")  # nothing long enough to check
+
+
+@pytest.mark.asyncio
+async def test_the_cleaner_keeps_the_raw_words_when_the_model_stops_early(monkeypatch):
+    cleaner = TunedCleaner("fake/model")
+    raw = "please refactor the login module and afterwards run the integration tests again"
+    monkeypatch.setattr(TunedCleaner, "_generate", lambda self, text: "Please refactor the login module.")
+    assert await cleaner.clean(raw, deadline_s=2.0) == raw
+
+
+@pytest.mark.asyncio
+async def test_a_long_dictation_is_cleaned_group_by_group(monkeypatch):
+    cleaner = TunedCleaner("fake/model")
+    seen = []
+
+    def fake_generate(self, text):
+        seen.append(text)
+        return text.replace(" um", "").replace(" uh", "")
+
+    monkeypatch.setattr(TunedCleaner, "_generate", fake_generate)
+    raw = " ".join(f"Sentence {i} um says something about the parser uh today." for i in range(10))
+    out = await cleaner.clean(raw, deadline_s=5.0)
+    assert len(seen) >= 2
+    assert " um" not in out and " uh" not in out
+    assert out.split()[-1] == "today."

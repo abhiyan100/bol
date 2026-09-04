@@ -508,6 +508,48 @@ def apply_vocabulary(text: str, words=(), session=()) -> str:
     return text
 
 
+# Longest single generation the cleaner will ask for, and the size of one
+# group when a dictation is split for cleaning.
+MAX_OUTPUT_TOKENS = 600
+CHUNK_WORDS = 40
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_TAIL_WORD = re.compile(r"[A-Za-z][A-Za-z0-9'-]{3,}")
+
+
+def split_for_cleanup(text: str, limit: int = CHUNK_WORDS) -> list[str]:
+    """Sentence groups of about `limit` words; one group for short text."""
+    words = text.split()
+    if len(words) <= int(limit * 1.5):
+        return [text.strip()] if text.strip() else []
+    groups, current, count = [], [], 0
+    for sentence in _SENTENCE_SPLIT.split(text.strip()):
+        n = len(sentence.split())
+        if current and count + n > limit:
+            groups.append(" ".join(current))
+            current, count = [], 0
+        current.append(sentence)
+        count += n
+    if current:
+        groups.append(" ".join(current))
+    return groups
+
+
+def _tail_kept(raw: str, cleaned: str) -> bool:
+    """Did the end of the dictation survive the rewrite?
+
+    The failure this catches is a rewrite that stops early and drops the
+    last clause. The last content word of the raw text has to appear in the
+    final part of the cleaned text; a raw text with no such word passes.
+    """
+    words = _TAIL_WORD.findall(raw)
+    if not words:
+        return True
+    last = words[-1].lower().strip("'-")
+    tail = cleaned[int(len(cleaned) * 0.5):].lower()
+    last_words = [w.strip(".,;:!?\"'()") for w in cleaned.lower().split()[-6:]]
+    return last in tail or last in last_words
+
+
 def _suspicious(raw: str, cleaned: str) -> bool:
     """Reject LLM rewrites that grew or shrank implausibly."""
     if not cleaned:
@@ -547,7 +589,15 @@ class TunedCleaner:
             ],
             add_generation_prompt=True,
         )
-        return generate(model, tokenizer, prompt=prompt, max_tokens=120).strip()
+        # The output budget follows the input. A fixed 120 tokens cut the tail
+        # off anything longer than about eighty words, which is exactly the
+        # dictation people bother to clean up.
+        try:
+            spoken = len(tokenizer.encode(text))
+        except Exception:
+            spoken = max(1, len(text) // 4)
+        budget = min(MAX_OUTPUT_TOKENS, int(spoken * 1.5) + 40)
+        return generate(model, tokenizer, prompt=prompt, max_tokens=budget).strip()
 
     async def warmup(self) -> None:
         import asyncio
@@ -555,20 +605,32 @@ class TunedCleaner:
         await mlx_thread.run(self._load)
 
     async def clean(self, text: str, deadline_s: float) -> str:
+        """Clean one dictation, in sentence groups when it is long.
+
+        A long dictation goes through the model a group at a time (about
+        CHUNK_WORDS words each), so no single generation is long enough to
+        run out of budget, and a group the model mangles costs only that
+        group: the raw words come back for it, the rest stays cleaned. The
+        whole thing shares one deadline.
+        """
         import asyncio
 
+        async def run_all() -> str:
+            pieces = []
+            for chunk in split_for_cleanup(text):
+                out = await mlx_thread.run(self._generate, chunk)
+                out = out.strip().strip('"')
+                if _suspicious(chunk, out) or not _tail_kept(chunk, out):
+                    log.debug("tuned cleanup rejected: %r -> %r", chunk, out)
+                    out = chunk
+                pieces.append(out)
+            return " ".join(p for p in pieces if p)
+
         try:
-            out = await asyncio.wait_for(
-                mlx_thread.run(self._generate, text), timeout=deadline_s
-            )
+            return await asyncio.wait_for(run_all(), timeout=deadline_s)
         except Exception as exc:
             log.debug("tuned cleanup skipped (%s)", exc)
             return text
-        out = out.strip().strip('"')
-        if _suspicious(text, out):
-            log.debug("tuned cleanup rejected: %r -> %r", text, out)
-            return text
-        return out
 
 
 def build_cleaner(cfg) -> TunedCleaner | None:

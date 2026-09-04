@@ -10,7 +10,7 @@ import pytest
 from pynput import keyboard
 
 from bol.config import HotkeyConfig
-from bol.hotkey import MouseListener, listener as listener_mod
+from bol.hotkey import listener as listener_mod
 from bol.hotkey.listener import HotkeyListener, _resolve
 
 
@@ -164,83 +164,3 @@ async def test_the_key_is_armed_again_after_every_release(monkeypatch):
     await asyncio.sleep(0)
 
     assert events == ["press", "release", "press", "release"]
-
-
-# ------------------------------------------------------------- the mouse
-
-
-class FakeMouse:
-    """pynput's mouse.Listener minus the event tap."""
-
-    IS_TRUSTED = True
-
-    def __init__(self, on_click=None):
-        self.on_click = on_click
-        self.daemon = False
-        self.started = False
-        self.waited = False
-        self.stopped = False
-
-    def start(self):
-        self.started = True
-
-    def wait(self):
-        self.waited = True
-
-    def stop(self):
-        self.stopped = True
-
-    def click(self, pressed=True):
-        self.on_click(10, 20, "left", pressed)
-
-
-async def test_a_click_reaches_the_callback():
-    clicks = []
-    mouse = MouseListener(lambda: clicks.append(True), backend=FakeMouse)
-
-    assert mouse.start() is True
-    backend = mouse._listener
-    backend.click()
-    await asyncio.sleep(0)
-
-    assert clicks == [True]
-    assert backend.daemon is True  # never keeps the process alive
-    mouse.stop()
-    assert backend.stopped is True
-
-
-async def test_the_release_half_of_a_click_is_not_a_second_click():
-    # One click is one cancel. Reporting both halves would cancel the
-    # recording and then cancel whatever replaced it.
-    clicks = []
-    mouse = MouseListener(lambda: clicks.append(True), backend=FakeMouse)
-    mouse.start()
-
-    mouse._listener.click(pressed=True)
-    mouse._listener.click(pressed=False)
-    await asyncio.sleep(0)
-
-    assert clicks == [True]
-
-
-async def test_a_mouse_listener_that_cannot_start_is_simply_not_there():
-    # It shares a process with the hotkey, which is the thing that must never
-    # break, so every failure here is a listener that is not running.
-    def explode(on_click=None):
-        raise OSError("no event tap for you")
-
-    mouse = MouseListener(lambda: None, backend=explode)
-
-    assert mouse.start() is False
-    assert mouse.running is False
-    mouse.stop()  # and stopping one that never started is inert
-
-
-async def test_a_mouse_listener_without_input_monitoring_is_not_used():
-    class Untrusted(FakeMouse):
-        IS_TRUSTED = False
-
-    mouse = MouseListener(lambda: None, backend=Untrusted)
-
-    assert mouse.start() is False
-    assert mouse.running is False
