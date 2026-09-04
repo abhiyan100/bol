@@ -1706,6 +1706,7 @@ async def test_the_window_title_spells_this_sessions_own_words():
     # The project name is in the title of the window the words are going into,
     # so a dictated "bowl" in a Bol window is Bol.
     d = _clean_daemon(1, ["the bowl daemon pastes it"], FakeCleaner())
+    d.cfg.vocabulary.learn = True  # the learned sources are opt-in
     d.bridge = TitledBridge("Bol - claude - 180x48")
 
     await d._handle_utterance("the bowl daemon pastes it")
@@ -1734,6 +1735,7 @@ async def test_a_paste_teaches_the_next_dictation_how_to_spell_it():
         2, ["Refactor the Kokoro loader", "the kokora loader is slow"],
         FakeCleaner(),
     )
+    d.cfg.vocabulary.learn = True  # the learned sources are opt-in
     d.bridge = TitledBridge("")
 
     await d._handle_utterance("Refactor the Kokoro loader")
@@ -2054,3 +2056,14 @@ async def test_warming_the_speech_model_draws_nothing():
     d.summarizer = None
     await d._warm_speech_model()
     assert d.hud.calls == []
+
+
+@pytest.mark.asyncio
+async def test_learning_is_off_by_default_so_only_the_word_list_counts():
+    # The predictable version: a Bol window and a "ball" in the transcript
+    # change nothing unless [vocabulary] learn = true or "Bol" is in words.
+    d = _daemon(1, ["the ball model is fast"], talk_back=False)
+    d.summarizer = None
+    d.bridge.title = "Bol - claude - 180x48"
+    words = await d._session_words()
+    assert words == []

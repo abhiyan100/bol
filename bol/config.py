@@ -191,6 +191,11 @@ class VocabularyConfig:
     # words are never touched, and entries shorter than five characters only
     # ever fix capitalization, because a wrong correction is worse than none.
     words: list = field(default_factory=list)
+    # Also learn this session's own words: the project name in the front
+    # window's title and names from your earlier pastes. Deterministic string
+    # matching, no model, no latency. Off by default: the list above is the
+    # predictable version.
+    learn: bool = False
 
 
 @dataclass
@@ -527,11 +532,11 @@ model = "abhiyan10/bol-cleanup-350m-4bit"  # Bol's own 195MB model; "" = rules o
 # Words Bol should spell your way: your name, your project, a library the
 # transcriber has never met. A dictated word within one edit of an entry is
 # replaced with the entry, exactly as written. Common English words are left
-# alone. Bol always knows the usual tool names (Claude Code, GitHub, uv).
-# Bol also learns this session's own words as it goes, from the front window's
-# title and from your earlier pastes, and spells a word that sounds like one of
-# them ("bowl" in a window titled Bol) that way.
+# alone. Bol always knows the usual tool names (Claude Code, GitHub, uv) and
+# every spelling of its own wake phrase.
 words = []             # e.g. ["Abhiyan", "Poudel", "Parakeet", "Kokoro"]
+learn = false          # true: also learn the front window's project name and your
+                       # earlier pastes as names for this session (no model, no delay)
 
 [summarizer]
 engine = "auto"        # llm persona when available, template otherwise

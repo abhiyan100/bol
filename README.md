@@ -181,10 +181,11 @@ Cleanup is deliberately conservative. Deterministic rules run first
 `--verbose`), then a spelling pass for tool names and your `[vocabulary]`
 words, then Bol's own 350M model, trained for exactly this job because
 generic small models silently drop clauses like "don't touch login.py".
-Every step falls back to the text before it. The spelling pass also learns
-this session's own words as it goes, from the title of the window you are
-typing into and from your earlier pastes, so a dictated "bowl" becomes `Bol`
-in a Bol window and is left alone everywhere else.
+Every step falls back to the text before it. With `[vocabulary] learn = true`, the spelling pass also learns this
+session's own words as it goes, from the title of the window you are
+typing into and from your earlier pastes, so a dictated word that sounds
+like one of them is spelled the way you spell it. Off by default; the
+model itself only ever sees your raw sentence, so nothing slows down.
 
 ## Troubleshooting
 

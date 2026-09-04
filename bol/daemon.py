@@ -1152,6 +1152,9 @@ class Daemon:
         user wrote down, the project name in the title of the window about to
         receive the paste, and the names in their own earlier pastes.
         """
+        if not self.cfg.vocabulary.learn:
+            # The predictable version: only the words the user wrote down.
+            return session_words(self.cfg.vocabulary.words, [], {})
         return session_words(
             self.cfg.vocabulary.words,
             title_words(await self._front_title()),
