@@ -1,6 +1,6 @@
 """Bol: speak to Claude Code, hear back what happened."""
 
-__version__ = "0.6.6"
+__version__ = "0.6.7"
 
 INSTALL_URL = "git+https://github.com/abhiyan100/bol"
 
