@@ -1,6 +1,6 @@
 [project]
 name = "bol"
-version = "0.6.4"
+version = "0.6.5"
 description = "Speak. Bol runs Claude Code hands-free: dictate, command, and hear back what happened."
 readme = "README.md"
 license = { text = "MIT" }

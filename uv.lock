@@ -140,7 +140,7 @@ wheels = [
 
 [[package]]
 name = "bol"
-version = "0.6.4"
+version = "0.6.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp", marker = "sys_platform == 'darwin'" },
