@@ -110,13 +110,25 @@ Paste itself re-checks the front app right before Cmd+V and restores the
 clipboard in a `finally`, skipping the restore when the clipboard held
 non-text content.
 
-**One narrated session at a time.** Hook payloads carry `session_id` and
-`cwd`, so the daemon binds to the first session it hears from and ignores
-others (with one printed hint), including their permission prompts: a
-spoken "go ahead" must never answer a prompt the user is not looking at.
-`[server] follow = "all"` opts out. The hook server compares tokens in
-constant time and refuses to bind a non-loopback host unless
-`allow_remote` is set.
+**One narrated session at a time, and it is the one you send to.** Hook
+payloads carry `session_id` and `cwd`. Binding to the first session heard
+from was wrong in the case that matters: hooks are user-scoped, so an
+unrelated agent session grinding through tool calls would claim Bol, bounce
+the pill at its work for minutes, and leave the turn the user had just
+dictated unnarrated. Pressing Enter for the user is the only signal about
+which terminal they mean, so a send (a SEND from the grammar, or the send
+trigger word) opens a `[server] bind_window_s` window (20 s) and the first
+event from any other session inside it moves the narration there, agent name
+and all, with one printed line. Outside the window a foreign session is
+ignored completely: no pill, no speech, no summary, and no permission prompt,
+because a spoken "go ahead" must never answer a prompt the user is not
+looking at. Before Bol has bound to anything, a Stop, a notification or a
+permission request may claim it (read-back without dictation), a bare
+`PostToolUse` may not. Answering a prompt opens no window: Bol only ever
+announces prompts from the session it is already narrating, so a window there
+could only move the narration away from it. `[server] follow = "all"` opts
+out of all of this. The hook server compares tokens in constant time and
+refuses to bind a non-loopback host unless `allow_remote` is set.
 
 **The mic is ready before the key goes down.** The recorder builds one
 `sounddevice` stream and keeps it; the callback always feeds a two-second
@@ -181,12 +193,17 @@ indicator. A detection is treated like a dictation start: the ring's pre-roll
 captures the words right after the phrase, the phrase is stripped before
 the grammar, and dictation is pasted once the pause ends, without Enter.
 Measured: 2.5 percent of one core idle, detection at threshold 0.12 on two synthetic
-voices with no false wakes on 30 s of speech. Muted while Bol speaks and
-for 500 ms after. A trigger word gives the speaker speak_window_ms to start
-talking and then hides the pill again.
+voices with no false wakes on 30 s of speech. Muted for the whole of every
+recording, and while Bol speaks the ear stays open but only a wake is
+honoured: "hey Bol" hushes the speaker and starts a listen, so a long summary
+can be cut short by voice, while send, cancel and sleep heard during the
+sentence and its 500 ms tail are dropped as Bol hearing its own hint. A
+sentence with a wake spelling in it is the exception and mutes fully, because
+nothing can tell that apart from the user saying it. A trigger word gives the
+speaker speak_window_ms to start talking and then hides the pill again.
 
 **The pill is a separate process.** State on screen (listening, finalizing,
-thinking with the running tool, permission, speaking, error with its remedy)
+permission, speaking, error with its remedy)
 is drawn by `bol/hud/app.py`, a PyObjC child fed JSON lines over stdin. Not
 in-process AppKit: an app-policy NSApplication becomes the frontmost app,
 and the focused bridge would then refuse to paste into "Python". The child

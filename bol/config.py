@@ -226,10 +226,17 @@ class ServerConfig:
     port: int = 8770
     # Shared secret appended to the hook URL; auto-generated on install.
     token: str = ""
-    # Claude Code hooks are user-scoped, so every session on this machine
-    # posts here. first: narrate only the first session Bol hears from.
+    # Agent hooks are user-scoped, so every Claude Code and every Codex on
+    # this machine posts here, including ones nobody is looking at.
+    # first: narrate one session, the one you last sent to (see bind_window_s).
     # all: narrate every session (replies will interleave).
     follow: str = "first"  # first | all
+    # follow = "first" only. Sending is the one signal that says which
+    # session the user means, so after Bol presses Enter for you (a spoken
+    # send, or a send trigger word) the first hook event from another session
+    # inside this many seconds moves the narration there. 0 pins Bol to
+    # whichever session it happened to hear from first.
+    bind_window_s: float = 20.0
     # /hook types into your terminal, so it stays on loopback unless you
     # deliberately open it up.
     allow_remote: bool = False
@@ -537,7 +544,11 @@ anywhere = true        # dictation lands wherever the cursor is: Notes, Slack, a
 
 [server]
 port = 8770
-# follow = "first"      # narrate one Claude Code session at a time; "all" narrates every session
+bind_window_s = 20     # agent hooks are user-scoped, so every session on this Mac posts
+                       # here. Bol narrates the one you last sent to: after it presses
+                       # Enter for you, a hook event from another session within this
+                       # many seconds moves the narration there. 0 = never move.
+# follow = "first"      # narrate the session you last sent to; "all" narrates every session
 # allow_remote = false  # true lets the hook server bind off loopback (your network can type into your terminal)
 
 [setup]

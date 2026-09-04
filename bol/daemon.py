@@ -42,6 +42,7 @@ import logging
 import queue
 import sys
 import time
+from math import inf
 from pathlib import Path
 
 from .audio import Recorder
@@ -60,7 +61,7 @@ from .config import Config, hook_token, validate_config
 from .grammar import Action, Grammar
 from .hooks import HookServer, TurnTracker, display_name
 from .hotkey import HotkeyListener, MouseListener
-from .hud import Hud, tool_line
+from .hud import Hud
 from .llm import LLMEngine
 from .speak import build_speaker, play_cue
 from .stt import STREAM_END, build_transcriber
@@ -70,8 +71,10 @@ from .wake import (
     SEND,
     SLEEP,
     TYPE,
+    UNMUTE_DELAY_S,
     WAKE,
     WakeListener,
+    contains_wake_phrase,
     keyword_map,
     strip_wake_phrase,
     trigger_phrases,
@@ -284,10 +287,18 @@ class Daemon:
         self._asleep = False
         self._last_reply = ""
         # Agent hooks are user-scoped, so every session on this machine posts
-        # here. Bol latches onto one (see [server] follow).
+        # here. Bol narrates one (see [server] follow and _follows).
         self._bound_session: str | None = None
         self._bound_cwd = ""
         self._warned_other_session = False
+        # Monotonic deadline of the binding window: the seconds after Bol
+        # presses Enter for the user in which the next session to speak is
+        # taken to be the one they sent to. 0 is "no window open".
+        self._bind_until = 0.0
+        # Monotonic deadline of Bol's own voice, tail included. While this is
+        # in the future the ear stays open but only "hey Bol" is honoured;
+        # every other trigger word heard then is Bol hearing itself.
+        self._speech_until = 0.0
         # Which session raised the permission prompt we're waiting on, so a
         # spoken "yes" can never approve a different session's prompt.
         self._permission_session: str | None = None
@@ -510,10 +521,20 @@ class Daemon:
         dictation gets the longer pause of someone composing a prompt. Both are
         ignored while a recording is already running, because that recording is
         the answer to whatever is being said now.
+
+        While Bol is speaking only "hey bol" is honoured, and it interrupts:
+        see _mid_sentence.
         """
         if self.wake is None or self._asleep:
             return
         kind = self._wake_kinds.get(phrase, WAKE)
+        if kind != WAKE and self._mid_sentence():
+            # Bol is talking, so this is almost certainly Bol's own words
+            # coming back through the room: the "say send it to send" hint
+            # would otherwise press Enter, and Bol would be sending to
+            # itself. Only a wake gets through, and it barges in below.
+            log.debug("heard %r while speaking, ignored", phrase or kind)
+            return
         if kind == WAKE and self._wake_dictates:
             # One-way, and no short trigger word configured: "hey bol" is how
             # you start dictating, so it gets the dictation's timings.
@@ -540,6 +561,16 @@ class Daemon:
             self._listen_session(session, until_silence=True, trigger=kind)
         )
         listen.add_done_callback(_drain)
+
+    def _mid_sentence(self) -> bool:
+        """Is Bol speaking right now, or inside the tail just after it?
+
+        The tail is the same UNMUTE_DELAY_S the ear used to be muted for: the
+        room's reverb of Bol's own last word is still arriving when the
+        sentence has finished. Always false in one-way mode, which has no
+        voice to hear.
+        """
+        return self._clock() < self._speech_until
 
     def _hush(self) -> None:
         """Barge-in: cut Bol off mid-sentence. Inert in one-way mode, where
@@ -688,6 +719,8 @@ class Daemon:
                 # wherever they are looking, Notes and Slack included.
                 await self._keys("Enter", explicit=True)
                 self._pending_paste = False
+                # And it says which agent session Bol should be narrating.
+                self._open_binding_window()
                 # Nothing on screen: the text left the box, which the user can
                 # see. The chime is the whole receipt.
                 self._idle_pill()
@@ -1180,7 +1213,12 @@ class Daemon:
         """
         session = self._permission_session or ""
         self._permission_session = None
-        if not self._follows(session):
+        # No binding window opens here, unlike the two send paths. Bol only
+        # ever announces a prompt from the session it is already narrating,
+        # so a window opened by an answer could not find a better session to
+        # move to; it could only hand the narration to an unrelated one that
+        # happened to run a tool in the next twenty seconds.
+        if not self._narrates(session):
             await self._speak(
                 f"That prompt came from another {self.agent_name} session, "
                 "so I left it alone."
@@ -1257,6 +1295,9 @@ class Daemon:
             # wherever they are looking, Notes and Slack included.
             await self._inject(text, submit=True, explicit=True)
             self._pending_paste = False
+            # The turn just handed over is the one worth narrating, whichever
+            # session picks it up. See _follows.
+            self._open_binding_window()
             # Same as a spoken "send it": the pill stays off and the chime is
             # the receipt.
             self._idle_pill()
@@ -1301,13 +1342,23 @@ class Daemon:
                     self._idle_pill()
                 return
             # Bol's own voice is the loudest thing this microphone will hear
-            # all day, and "hey Bol" is a phrase Bol says. Deaf while
-            # speaking, and for the tail after it.
-            self._mute_wake()
+            # all day, so Bol used to go deaf while it spoke. That also made
+            # a long summary unstoppable by voice. The ear stays open now and
+            # _wake_detected does the filtering: "hey Bol" cuts Bol off,
+            # every other trigger word heard mid-sentence is dropped as Bol
+            # hearing itself. The exception is a sentence with a wake
+            # spelling IN it, which nothing can tell apart from the user
+            # saying it, so that one utterance is muted the old way.
+            echo = contains_wake_phrase(text, self.cfg.wake.phrases)
+            if echo:
+                self._mute_wake()
+            self._speech_until = inf
             try:
                 await self.speaker.speak(text)
             finally:
-                self._unmute_wake()
+                self._speech_until = self._clock() + UNMUTE_DELAY_S
+                if echo:
+                    self._unmute_wake()
                 # An error and a permission question stay on screen: one is a
                 # remedy to read, the other a question still waiting for its
                 # answer. Both leave on their own, or on the next state.
@@ -1316,42 +1367,87 @@ class Daemon:
 
     # ---------------------------------------------------------------- sessions
 
-    def _follows(self, session_id: str, cwd: str = "") -> bool:
+    def _follows(
+        self, session_id: str, cwd: str = "", agent: str = "", claims: bool = True
+    ) -> bool:
         """Whether this hook event belongs to the session Bol is narrating.
 
-        Agent hooks are user-scoped, so a second `claude` (or a `codex`) in
-        another terminal posts here too. Left unfiltered, each session's Stop
-        cuts the previous summary off mid-sentence and reopens the mic, and a
-        "yes" meant for one prompt approves whichever terminal is frontmost.
-        Bol latches onto the first session it hears from, whichever agent that
-        is; [server] follow = "all" opts back into narrating every session.
+        Agent hooks are user-scoped, so every `claude` and every `codex` on
+        this Mac posts here, including the ones nobody is looking at. Bol
+        narrates one of them, and the one it picks is the one the user last
+        sent to: pressing Enter for them is the only signal Bol ever gets
+        about which terminal they mean. So a send opens a short window
+        ([server] bind_window_s) and the first event from another session
+        inside it moves the narration there, agent name and all. Outside that
+        window a foreign session is ignored completely: no pill, no speech,
+        no summary, and no "yes" that could answer a prompt the user is not
+        looking at. [server] follow = "all" narrates everything instead.
+
+        claims is whether this kind of event may pick a session when Bol has
+        never bound to one at all. A Stop, a notification and a permission
+        request may: they are the agent speaking to the user, and someone who
+        only wants read-back never sends anything for Bol to bind on. A bare
+        PostToolUse may not, and that is the whole bug this rule exists for:
+        an unrelated session grinding through tool calls used to capture Bol
+        for minutes while the turn the user had just dictated went unspoken.
         """
         if self.cfg.server.follow == "all" or not session_id:
             return True
         if self._bound_session is None:
-            self._bound_session = session_id
-            self._bound_cwd = cwd
-            print(f"bol: narrating {self._session_label()}.")
+            if not claims:
+                return False
+            self._bind_session(session_id, cwd, agent)
             return True
         if session_id == self._bound_session:
             if cwd and not self._bound_cwd:
                 self._bound_cwd = cwd
             return True
+        if self._mid_binding_window():
+            # The user pressed Enter a moment ago and this is who answered.
+            # One event moves the narration; the window shuts behind it.
+            self._bind_until = 0.0
+            self._bind_session(session_id, cwd, agent)
+            return True
         if not self._warned_other_session:
             self._warned_other_session = True
             print(
-                "bol: another agent session is running; Bol is only "
-                f"narrating {self._session_label()}."
+                "bol: another agent session is running. Bol narrates the one "
+                f"you last sent to ({self._session_label()})."
             )
         log.debug("ignoring hook event from session %s", session_id)
         return False
 
-    def _shows(self, session_id: str) -> bool:
-        """Whether the pill may show this event. Read-only on purpose.
+    def _bind_session(self, session_id: str, cwd: str, agent: str = "") -> None:
+        """Narrate this session from here on, and say so once.
 
-        _follows() latches Bol onto a session, and that decision belongs to
-        the Stop handler. A tool event arriving first must never be what
-        binds Bol to a session it was never asked to narrate.
+        The cwd replaces the old one rather than falling back to it: the
+        previous basename names a project Bol is no longer talking about.
+        """
+        self._bound_session = session_id
+        self._bound_cwd = cwd
+        self._bind_agent(agent)
+        print(f"bol: narrating {self._session_label()} ({self.agent_name}).")
+
+    def _mid_binding_window(self) -> bool:
+        """Is Bol still waiting to hear who the last Enter went to?"""
+        return self._clock() < self._bind_until
+
+    def _open_binding_window(self) -> None:
+        """Bol just pressed Enter for the user, so the next session to speak
+        is the one they meant. See _follows."""
+        try:
+            window = float(self.cfg.server.bind_window_s or 0)
+        except (TypeError, ValueError):
+            return
+        if window > 0:
+            self._bind_until = self._clock() + window
+
+    def _narrates(self, session_id: str) -> bool:
+        """Whether Bol is narrating this session right now. Read-only.
+
+        Answering a permission prompt asks this rather than _follows: the
+        Enter goes to whichever terminal is frontmost, and a keystroke must
+        never be what binds Bol to a session or moves it to another one.
         """
         if self.cfg.server.follow == "all" or not session_id:
             return True
@@ -1378,8 +1474,19 @@ class Daemon:
         # A Codex PostToolUse carries no agent marker of its own, so the
         # agent already being narrated is what it is attributed to.
         tool = self.tracker.record_tool(payload, self._agent)
-        if self._shows(payload.get("session_id", "")):
-            self.hud.set("thinking", "Thinking", tool_line(tool.tool_name, tool.detail))
+        # Nothing on screen. A tool call is the agent working, which is not
+        # something the user has to do anything about, and the pill bouncing
+        # "Thinking" at every one of them was noise at best; coming from a
+        # session the user was not looking at, it was a lie. The tool log
+        # still feeds the summary. The one thing a tool event may do here is
+        # move the narration, when the user has just sent to a session Bol
+        # was not bound to and this is that session answering.
+        self._follows(
+            payload.get("session_id", ""),
+            payload.get("cwd", ""),
+            tool.agent,
+            claims=False,
+        )
 
     async def _on_stop(self, payload: dict) -> None:
         if not self.talk_back:
@@ -1387,7 +1494,7 @@ class Daemon:
         # Always finish the turn, even for a session we ignore, so its tool
         # log is drained rather than left behind.
         event = self.tracker.finish_turn(payload, self._agent)
-        if not self._follows(event.session_id, event.cwd):
+        if not self._follows(event.session_id, event.cwd, event.agent):
             return
         self._bind_agent(event.agent)
         if self.summarizer is None:
@@ -1403,7 +1510,7 @@ class Daemon:
         if not self.talk_back:
             return
         note = self.tracker.notification(payload, self._agent)
-        if not self._follows(note.session_id):
+        if not self._follows(note.session_id, payload.get("cwd", ""), note.agent):
             return
         self._bind_agent(note.agent)
         if note.notification_type == "permission_prompt":
@@ -1422,7 +1529,7 @@ class Daemon:
         if not self.talk_back:
             return
         note = self.tracker.permission_request(payload)
-        if not self._follows(note.session_id, payload.get("cwd", "")):
+        if not self._follows(note.session_id, payload.get("cwd", ""), note.agent):
             return
         self._bind_agent(note.agent)
         await self._ask_permission(note.session_id, note.message)

@@ -800,10 +800,14 @@ async def test_the_pill_goes_away_the_moment_the_words_land():
     assert states[-1] == "idle"
 
 
-async def test_bol_is_deaf_while_it_speaks_and_for_the_tail_after():
+async def test_bol_keeps_its_ear_open_while_it_speaks():
+    # Bol used to go deaf while it spoke, which also made a long summary
+    # impossible to cut short by voice. The ear stays on now; what protects
+    # Bol from its own voice is which trigger words are honoured while the
+    # sentence (and its 500 ms tail) runs.
     clock = Clock()
     d = _wake_daemon(0, [], clock)
-    listener = WakeListener(d.cfg.wake, lambda score: None, clock=clock)
+    listener = WakeListener(d.cfg.wake, lambda score, phrase="": None, clock=clock)
     d.wake = listener
     heard = []
 
@@ -818,10 +822,94 @@ async def test_bol_is_deaf_while_it_speaks_and_for_the_tail_after():
 
     await d._speak("Claude finished the job.")
 
-    assert heard == [True]
-    assert listener.muted is True
-    clock.advance(wake.UNMUTE_DELAY_S + 0.01)
+    assert heard == [False]
     assert listener.muted is False
+    assert d._mid_sentence() is True  # the tail is still running
+    clock.advance(wake.UNMUTE_DELAY_S + 0.01)
+    assert d._mid_sentence() is False
+
+
+async def test_hey_bol_cuts_a_long_summary_short():
+    # The whole point of leaving the ear open: a wake heard mid-sentence
+    # hushes the speaker and starts a listen, exactly like any other wake.
+    clock = Clock()
+    d = _wake_daemon(1, ["and now the logout test"], clock, awake_s=0.0)
+    heard, hushed = [], []
+
+    class Talker:
+        async def speak(self, text):
+            heard.append(d.wake.muted)
+            d._wake_detected(0.7, "hey bol")
+
+        async def stop(self):
+            hushed.append(True)
+
+    d.speaker = Talker()
+
+    await d._speak("A very long summary nobody wants to sit through.")
+    await asyncio.sleep(0.05)
+
+    assert heard == [False]          # never muted for that sentence
+    assert hushed == [True]          # the speaker was cut off
+    assert d.recorder.calls == [True]  # and Bol listened
+    assert d.bridge.injected == [("and now the logout test ", False)]
+
+
+async def test_a_send_heard_while_bol_speaks_is_bol_hearing_itself():
+    # "Say send it to send" is a sentence Bol says out loud. Acting on the
+    # send in it would be Bol pressing Enter on the user's behalf because it
+    # heard its own hint.
+    clock = Clock()
+    d = _wake_daemon(0, [], clock, awake_s=0.0)
+    d._pending_paste = True  # there IS something to send: only the rule stops it
+
+    class Talker:
+        async def speak(self, text):
+            for phrase in ("send it", "scratch that", "stop listening"):
+                d._wake_detected(0.7, phrase)
+
+        async def stop(self):
+            pass
+
+    d.speaker = Talker()
+
+    await d._speak('Pasted. Say "send it" to send.')
+    await asyncio.sleep(0.05)
+
+    assert d.bridge.keys == []
+    assert d._pending_paste is True
+    assert d._asleep is False
+    assert d.recorder.calls == []
+
+
+async def test_a_sentence_with_the_wake_phrase_in_it_mutes_the_ear_completely():
+    # Nothing can tell Bol saying "hey Bol" from the user saying it, so that
+    # one utterance goes back to the old rule.
+    clock = Clock()
+    d = _wake_daemon(0, [], clock)
+    heard = []
+
+    class Talker:
+        async def speak(self, text):
+            heard.append(d.wake.muted)
+
+        async def stop(self):
+            pass
+
+    d.speaker = Talker()
+
+    await d._speak('Say "hey Bol" whenever you want me.')
+
+    assert heard == [True]
+    assert d.wake.muted is False  # and the ear comes back when the sentence ends
+
+
+def test_a_wake_spelling_is_only_a_wake_phrase_as_whole_words():
+    assert wake.contains_wake_phrase('Say "hey Bol" whenever you want me.') is True
+    assert wake.contains_wake_phrase("Claude finished the job.") is False
+    # "a bol" is one of the spellings, and it sits inside "a bold move".
+    assert wake.contains_wake_phrase("That was a bold move.") is False
+    assert wake.contains_wake_phrase("", []) is False
 
 
 async def test_bol_is_deaf_while_it_records():

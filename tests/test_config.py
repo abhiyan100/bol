@@ -310,6 +310,27 @@ def test_anywhere_is_in_the_default_file_and_agrees_with_the_dataclass():
     assert data["bridge"]["anywhere"] is True
 
 
+def test_the_binding_window_is_in_the_default_file_and_agrees_with_the_dataclass():
+    # Hooks are user-scoped, so which session Bol narrates is a setting
+    # people will reach for. It has to be in the documented file, spelled
+    # the same as the dataclass reads it.
+    data = tomllib.loads(DEFAULT_CONFIG_TOML)
+    cfg = Config()
+    for key, value in data["server"].items():
+        assert getattr(cfg.server, key) == value, key
+    assert data["server"]["bind_window_s"] == cfg.server.bind_window_s == 20.0
+    assert cfg.server.follow == "first"
+
+
+def test_load_config_reads_the_binding_window(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[server]\nbind_window_s = 5.0\n")
+
+    cfg = load_config(path)
+
+    assert cfg.server.bind_window_s == 5.0
+
+
 def test_talk_back_is_the_one_switch_between_the_two_modes(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text("talk_back = true\n")

@@ -279,8 +279,32 @@ def _stop(session_id, message="Claude finished the job it was given.", cwd="/w/r
     }
 
 
-def _hook_daemon():
-    d = _daemon(0, [])
+def _tool(session_id, command="pytest -q"):
+    return {
+        "hook_event_name": "PostToolUse",
+        "session_id": session_id,
+        "prompt_id": f"p-{session_id}",
+        "tool_name": "Bash",
+        "tool_input": {"command": command},
+        "tool_response": {},
+    }
+
+
+class Dial:
+    """A clock the test moves by hand, for the binding window."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def _hook_daemon(clock=None):
+    d = _daemon(0, [], clock=clock)
     d.summarizer = FakeSummarizer()
     return d
 
@@ -293,6 +317,93 @@ async def test_only_the_first_session_is_narrated():
     await d._on_stop(_stop("C", cwd="/work/gamma"))
     assert d.speaker.spoken == ["summary of A"]
     assert d._bound_session == "A"
+
+
+@pytest.mark.asyncio
+async def test_before_any_send_only_a_stop_binds_bol_to_a_session(capsys):
+    # Hooks are user-scoped, so the first thing Bol hears is often an
+    # unrelated session grinding through tool calls. That must not decide
+    # who gets narrated; a Stop (someone who never dictates but wants
+    # read-back) is the only event allowed to claim an unbound Bol.
+    d = _hook_daemon()
+
+    await d._on_tool(_tool("A", "rm -rf build"))
+    assert d._bound_session is None
+    assert d.hud.calls == []
+
+    await d._on_stop(_stop("B", cwd="/work/beta"))
+
+    assert d._bound_session == "B"
+    assert d.speaker.spoken == ["summary of B"]
+    assert "bol: narrating beta (Claude)." in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_a_send_moves_the_narration_to_whoever_answers(capsys):
+    # The bug in one test: Bol is stuck on an unrelated session, the user
+    # dictates and says "send it", and the session that picks the turn up is
+    # the one Bol should be narrating from then on.
+    clock = Dial()
+    d = _hook_daemon(clock)
+    await d._on_stop(_stop("A", cwd="/work/other"))
+    d.speaker.spoken.clear()
+    capsys.readouterr()
+
+    await d._handle_utterance("ship it send")  # the Enter the user asked for
+
+    await d._on_tool(_tool("B"))  # B answers first, inside the window
+    assert d._bound_session == "B"
+    assert "bol: narrating B (Claude)." in capsys.readouterr().out
+
+    await d._on_stop(_stop("B", cwd="/work/beta"))
+    await d._on_stop(_stop("A", cwd="/work/other"))
+
+    # B is narrated, A is not, and the window shut behind the first event.
+    assert d.speaker.spoken == ["summary of B"]
+    assert d._bound_session == "B"
+
+
+@pytest.mark.asyncio
+async def test_outside_the_window_a_foreign_session_draws_nothing():
+    clock = Dial()
+    d = _hook_daemon(clock)
+    await d._on_stop(_stop("A", cwd="/work/alpha"))
+    await d._handle_utterance("ship it send")
+    clock.advance(d.cfg.server.bind_window_s + 1.0)
+    d.hud.calls.clear()
+    d.speaker.spoken.clear()
+
+    await d._on_tool(_tool("B"))
+    await d._on_stop(_stop("B", cwd="/work/beta"))
+    await d._on_notification(
+        {
+            "hook_event_name": "Notification",
+            "session_id": "B",
+            "notification_type": "permission_prompt",
+            "message": "Claude wants to run rm -rf.",
+        }
+    )
+
+    assert d.hud.calls == []
+    assert d.speaker.spoken == []
+    assert d._permission_session is None
+    assert d._bound_session == "A"
+
+
+@pytest.mark.asyncio
+async def test_follow_all_still_narrates_everything_and_binds_nothing():
+    clock = Dial()
+    d = _hook_daemon(clock)
+    d.cfg.server.follow = "all"
+
+    await d._on_tool(_tool("A"))
+    await d._on_stop(_stop("A"))
+    clock.advance(600.0)  # no send, no window, and it makes no difference
+    await d._on_stop(_stop("B"))
+
+    assert d.speaker.spoken == ["summary of A", "summary of B"]
+    assert d._bound_session is None
+    assert "thinking" not in d.hud.states
 
 
 @pytest.mark.asyncio
@@ -634,18 +745,28 @@ async def test_the_pill_stays_hidden_when_the_turn_goes_to_claude():
 
 
 @pytest.mark.asyncio
-async def test_the_pill_shows_the_tool_claude_just_ran():
+async def test_a_tool_the_agent_ran_never_reaches_the_pill():
+    # There is nothing on screen while the agent works. A tool call is not
+    # something the user has to act on, and a "Thinking" pill bouncing at
+    # every one of them was noise. The tool log still feeds the summary.
     d = _hook_daemon()
+    await d._on_stop(_stop("A"))  # narrating A, so this is not a filter test
+    d.hud.calls.clear()
+
     await d._on_tool(
         {
             "session_id": "A",
-            "prompt_id": "p-A",
+            "prompt_id": "p-A2",
             "tool_name": "Bash",
             "tool_input": {"command": "pytest -q"},
             "tool_response": {},
         }
     )
-    assert d.hud.calls[-1] == ("thinking", "Thinking", "Bash: pytest -q")
+
+    assert d.hud.calls == []
+    assert "thinking" not in d.hud.states
+    # ... and the tool is still on the turn, for the summary to read.
+    assert [t.tool_name for t in d.tracker._tools["p-A2"]] == ["Bash"]
 
 
 @pytest.mark.asyncio

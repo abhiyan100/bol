@@ -88,6 +88,7 @@ __all__ = [
     "TYPE",
     "WAKE",
     "all_spellings",
+    "contains_wake_phrase",
     "UNMUTE_DELAY_S",
     "download_model",
     "human_size",
@@ -294,6 +295,41 @@ def parse_wake_line(line: str) -> tuple[float, str] | None:
     return score, " ".join(parts[2:]).strip().lower()
 
 
+def _phrase_alternatives(phrases) -> str:
+    """The spellings of these phrases as one regex alternation, longest first.
+
+    Longest first because the alternation matches in order: with "hey bol"
+    ahead of "hey bowl", the transcript "hey bowl run it" would lose its
+    "bol" and keep a stray "l".
+    """
+    words = sorted(all_spellings(phrases), key=len, reverse=True)
+    return "|".join(
+        r"[\s,]+".join(re.escape(word) for word in spelling.split())
+        for spelling in words
+    )
+
+
+def contains_wake_phrase(text: str, phrases=("hey bol",)) -> bool:
+    """Does this sentence say a wake phrase anywhere in it?
+
+    Bol's own voice is the loudest thing the microphone hears all day, so a
+    sentence with "hey bol" in it would wake Bol up on its way out of the
+    speaker. The daemon asks this before it speaks, and mutes the ear
+    completely for that one utterance.
+
+    Whole words only: "a bol" is a spelling of the wake phrase, and it sits
+    inside "a bold move".
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    alternatives = _phrase_alternatives(phrases)
+    if not alternatives:
+        return False
+    return (
+        re.search(rf"(?<!\w)(?:{alternatives})(?!\w)", text, re.IGNORECASE) is not None
+    )
+
+
 def strip_wake_phrase(text: str, phrases=("hey bol",)) -> str:
     """Take the wake phrase back off the front of a transcript.
 
@@ -304,16 +340,9 @@ def strip_wake_phrase(text: str, phrases=("hey bol",)) -> str:
     """
     if not isinstance(text, str) or not text.strip():
         return ""
-    # Longest first: the alternation matches in order, so with "hey bol"
-    # ahead of "hey bowl" the transcript "hey bowl run it" would lose its
-    # "bol" and keep a stray "l".
-    words = sorted(all_spellings(phrases), key=len, reverse=True)
-    if not words:
+    alternatives = _phrase_alternatives(phrases)
+    if not alternatives:
         return text.strip()
-    alternatives = "|".join(
-        r"[\s,]+".join(re.escape(word) for word in spelling.split())
-        for spelling in words
-    )
     pattern = re.compile(rf"^\s*(?:{alternatives})(?!\w)[\s,.!?:;-]*", re.IGNORECASE)
     return pattern.sub("", text, count=1).strip()
 

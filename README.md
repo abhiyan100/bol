@@ -73,8 +73,9 @@ out loud and keeps the microphone for your reply.
 
 Works in Claude Code, Codex, Cursor, Terminal, Notes, Slack, a browser
 field: anywhere you can type. A small pill at the top of the screen shows a
-level meter while you talk and disappears when the text lands. It comes back
-for a bounce while the agent works, and red with the fix when something is
+level meter while you talk and disappears when the text lands. Nothing on
+screen while the agent works: the pill comes back only when Bol speaks, when
+the agent needs an answer from you, and red with the fix when something is
 wrong. Nothing but a trigger word, the hotkey or a question Bol asked out
 loud ever puts it on screen, so a noisy room cannot summon it. It never
 takes focus.
@@ -91,6 +92,12 @@ Talk-back works with Claude Code and Codex CLI. `bol setup` wires whichever
 of the two is installed, and Bol names the one it is narrating, so a Codex
 turn is reported as Codex. Codex asks you once to review and trust the new
 hooks; accept it when it appears.
+
+Running several Claude Code sessions? Agent hooks are user-scoped, so all of
+them reach Bol. Bol narrates the one you last sent to: say "send it" and the
+session that picks that turn up is the one you hear about, for as long as you
+keep sending to it. Every other session is ignored, silently. Set
+`[server] follow = "all"` to hear all of them.
 
 ## How it works
 
