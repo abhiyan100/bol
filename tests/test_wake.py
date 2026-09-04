@@ -63,7 +63,7 @@ def no_osascript(monkeypatch):
     async def frontmost():
         return "com.apple.Terminal"
 
-    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
+    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost, raising=False)
 
 
 class Clock:
@@ -1912,78 +1912,6 @@ async def test_the_resume_line_is_printed_once(capsys):
 
 
 # ------------------------------------------------------------- cancelling
-
-
-async def test_another_app_coming_forward_cancels_a_trigger_recording(monkeypatch):
-    monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
-    seen = ["com.apple.Terminal", "com.apple.Terminal", "com.google.Chrome"]
-
-    async def frontmost():
-        return seen.pop(0) if len(seen) > 1 else seen[0]
-
-    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
-    clock = Clock()
-    d = _wake_daemon(0, [], clock, awake_s=60.0)
-    d.recorder = BlockingRecorder()
-
-    d._wake_detected(0.6, "type")
-    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
-    session = d._active_session
-    for _ in range(200):
-        await asyncio.sleep(0.005)
-        if session.stopped:
-            break
-
-    assert session.end_reason == "cancelled"
-    assert d.bridge.injected == []
-    assert d._awake() is False
-
-
-async def test_an_unreadable_frontmost_app_never_cancels_anything(monkeypatch):
-    # A missing Automation permission reads as "", and a permission Bol does
-    # not have must not cancel every recording it ever starts.
-    monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
-
-    async def frontmost():
-        return ""
-
-    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
-    clock = Clock()
-    d = _wake_daemon(0, [], clock)
-    d.recorder = BlockingRecorder()
-
-    d._wake_detected(0.6, "type")
-    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
-    session = d._active_session
-    await asyncio.sleep(0.05)
-
-    assert session.stopped is False
-    session.request_stop()
-    await asyncio.sleep(0.05)
-
-
-async def test_a_frontmost_watcher_that_raises_never_ends_a_recording(monkeypatch):
-    monkeypatch.setattr(daemon_mod, "FRONTMOST_POLL_S", 0.001)
-
-    async def frontmost():
-        raise OSError("osascript is not available")
-
-    monkeypatch.setattr(daemon_mod, "frontmost_bundle_id", frontmost)
-    clock = Clock()
-    d = _wake_daemon(0, [], clock)
-    d.recorder = BlockingRecorder()
-
-    d._wake_detected(0.6, "type")
-    await asyncio.wait_for(d.recorder.started.wait(), timeout=1.0)
-    session = d._active_session
-    await asyncio.sleep(0.05)
-
-    assert session.stopped is False
-    session.request_stop()
-    await asyncio.sleep(0.05)
-
-
-# ------------------------------------------------------ a model nobody has
 
 
 async def test_a_missing_keyword_model_costs_one_info_line(monkeypatch, tmp_path, caplog):

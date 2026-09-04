@@ -46,8 +46,7 @@ from math import inf
 from pathlib import Path
 
 from .audio import Recorder
-from .audio.capture import CANCELLED
-from .bridge import BridgeError, build_bridge, frontmost_bundle_id
+from .bridge import BridgeError, build_bridge
 from .bridge.focused import SubmitBlocked
 from .cleanup import (
     CLEANUP_SYSTEM,
@@ -125,7 +124,6 @@ SLEEP_HINT = "Paused. Press the key to resume"
 # looking at the same app. Every check is an osascript, and the thing being
 # caught (walking away from a microphone that opened itself) does not need
 # to be caught in under half a second.
-FRONTMOST_POLL_S = 0.5
 
 
 class _LiveWords:
@@ -226,10 +224,8 @@ class Daemon:
         # Watches for the click that means "not that". Optional, like wake.
         # The recording a trigger word started, while it is running: the one
         # a click or an app switch is allowed to cancel.
-        self._wake_session = None
         # Why it was cancelled, so the loop can print one line about it
         # instead of a log line and then a second, vaguer print.
-        self._cancel_reason = ""
         # Wake mode, when [wake] enabled = true and the extra is installed.
         # None the rest of the time, and every wake path checks for it.
         self.wake: WakeListener | None = None
@@ -751,55 +747,6 @@ class Daemon:
         self.hud.set("sending", SLEEP_HINT, hold=HINT_S)
         print("bol: paused. Press the key to resume.")
 
-    # ------------------------------------------------------------ cancelling
-
-    def _cancel_wake_recording(self, why: str, detail: str = "") -> None:
-        """Stop a recording nobody asked for, and remember the short reason.
-
-        The reason is kept rather than logged: the capture loop prints exactly
-        one line about a cancelled recording, and two lines saying the same
-        thing in different words is what this used to be.
-        """
-        session = self._wake_session
-        if session is None:
-            return
-        self._wake_session = None
-        self._cancel_reason = why
-        log.debug("recording cancelled: %s", detail or why)
-        session.request_stop(CANCELLED)
-
-    async def _watch_frontmost(self, session) -> None:
-        """Cancel this recording if the user goes somewhere else.
-
-        Polled rather than subscribed: the notification would be an
-        NSWorkspace observer and a second event source to own, where this
-        runs for the few seconds of one wake recording and stops. Reading it
-        costs an osascript, so the interval is 500 ms and not less.
-
-        A blank answer is "could not read it" (usually a missing Automation
-        permission), never "no app is frontmost", so it is ignored: a
-        permission Bol does not have must not cancel every recording.
-        """
-        try:
-            was = await frontmost_bundle_id()
-            while not session.stopped:
-                await asyncio.sleep(FRONTMOST_POLL_S)
-                if session.stopped:
-                    return
-                now = await frontmost_bundle_id()
-                if not now or not was:
-                    was = now or was
-                    continue
-                if now != was:
-                    self._cancel_wake_recording(
-                        "you switched apps", f"{was} gave way to {now}"
-                    )
-                    return
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - a watcher must not end a recording
-            log.debug("could not watch the frontmost app: %s", exc)
-
     def _touch_awake(self) -> None:
         """Start (or extend) the window in which no wake phrase is needed."""
         if self.wake is None:
@@ -994,15 +941,6 @@ class Daemon:
         # is already listening properly, so the keyword model has nothing to
         # add and every chance to hear the dictation as a wake.
         self._mute_wake()
-        watcher = None
-        if trigger:
-            # Only for a recording that started itself: this is the one the
-            # user may not have meant, so it is the one that watches for them
-            # doing something else instead.
-            self._wake_session = session
-            watcher = asyncio.get_running_loop().create_task(
-                self._watch_frontmost(session)
-            )
         try:
             live = self._start_live(session)
             try:
@@ -1027,16 +965,6 @@ class Daemon:
                 await self._speak(
                     "Lost the microphone. Check your input device.", state="error"
                 )
-                return STOP
-            if session.end_reason == CANCELLED:
-                # A click, or the user is in another app now. Whatever was
-                # said belongs to what they went to do, so it is not
-                # transcribed, not pasted, and the window that would have
-                # reopened the microphone is shut with it.
-                self._awake_until = 0.0
-                self.hud.set("idle")
-                why, self._cancel_reason = self._cancel_reason, ""
-                print(f"bol: cancelled ({why})." if why else "bol: cancelled.")
                 return STOP
             if audio is None:
                 log.debug("no speech captured")
@@ -1071,10 +999,6 @@ class Daemon:
             handled = await self._handle_utterance(text)
             return CHAIN if handled else STOP
         finally:
-            if watcher is not None:
-                watcher.cancel()
-            if self._wake_session is session:
-                self._wake_session = None
             self._active_session = None
             # This recording is over however it ended, so no stale session
             # can swallow the next press.
