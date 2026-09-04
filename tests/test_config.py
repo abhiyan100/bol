@@ -372,9 +372,9 @@ def test_validate_rejects_a_quoted_anywhere():
 # cleanup on every dictation because raw dictation is not professional.
 
 
-def test_the_pause_is_two_seconds_and_the_speak_window_is_five():
+def test_the_pause_is_two_and_a_half_seconds_and_the_speak_window_is_five():
     cfg = Config()
-    assert cfg.wake.pause_ms == 2000
+    assert cfg.wake.pause_ms == 2500
     assert cfg.wake.speak_window_ms == 5000
     # Off: with the awake window open, room noise kept reopening the mic.
     assert cfg.wake.awake_s == 0.0

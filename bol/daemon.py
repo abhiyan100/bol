@@ -900,29 +900,6 @@ class Daemon:
         task = asyncio.get_running_loop().create_task(play_cue(name))
         task.add_done_callback(_drain)
 
-    async def _follow_up_listen(self, question: str = "") -> None:
-        """Open the microphone once, after Bol has spoken. Two-way only.
-
-        Bol just read a summary or asked a question, so the next thing said is
-        the answer and should not need a trigger word. Exactly one window of
-        speak_window_ms, and then the microphone closes whatever happened:
-        the rolling awake window is what had the pill coming back again and
-        again while nobody was talking.
-        """
-        if not self.talk_back or self.text_mode or self.transcriber is None:
-            return
-        if self._asleep or self._listen_lock.locked() or self._pending_listen:
-            return
-        self.hud.set("listening", "Listening")
-        session = self._begin(WAKE)
-        await self._listen_session(
-            session, until_silence=True, trigger=WAKE, once=True
-        )
-        # Nobody answered, and the question is still waiting: put it back on
-        # screen rather than leaving an unanswered prompt with a blank pill.
-        if question and self._permission_session:
-            self.hud.set("permission", question)
-
     async def _listen_session(
         self, session, until_silence: bool, trigger: str = "", once: bool = False
     ) -> None:
@@ -1484,9 +1461,8 @@ class Daemon:
             return
         reply = await self.summarizer.summarize(event)
         await self._speak(reply)
-        # Bol just said something, so the next thing the user says is the
-        # reply to it. One window, then the microphone closes again.
-        await self._follow_up_listen()
+        # Then quiet. The user asked for this: after a reply the microphone
+        # stays closed until they say the wake phrase or press the key.
 
     async def _on_notification(self, payload: dict) -> None:
         if not self.talk_back:
@@ -1519,12 +1495,12 @@ class Daemon:
     async def _ask_permission(self, session_id: str, message: str) -> None:
         self._permission_session = session_id
         await self._speak(
-            f"{message} Say 'go ahead' or 'no'.", state="permission", pill=message
+            f"{message} Say hey Bol, then go ahead or no.",
+            state="permission",
+            pill=message,
         )
-        # Bol asked a question out loud, so the microphone opens for the
-        # answer. Once, for speak_window_ms, and the question goes back on
-        # the pill if nobody says anything.
-        await self._follow_up_listen(question=message)
+        # The question stays on the pill; the answer comes through the wake
+        # phrase like everything else. No microphone opens on its own.
 
     # ---------------------------------------------------------------- text mode
 

@@ -961,7 +961,7 @@ def test_the_trigger_words_are_on_by_default():
     assert cfg.sleep_phrases == ["stop listening"]
     assert cfg.threshold == 0.12
     assert cfg.type_threshold == 0.0  # 0 = use threshold
-    assert cfg.pause_ms == 2000        # two seconds, then the paste is instant
+    assert cfg.pause_ms == 2500        # two and a half seconds, then the paste is instant
     assert cfg.speak_window_ms == 5000  # how long the pill waits for speech
     # Off by default: with the window open, room noise kept reopening the
     # microphone and the pill kept coming back.
@@ -1169,7 +1169,7 @@ def test_doctor_reports_the_model_and_what_it_listens_for(monkeypatch, tmp_path)
     # should be told to say it.
     assert "listening for: hey bol, send it" in rows[2][1]
     assert "threshold 0.12" in rows[2][1]
-    assert "2s pause pastes a dictation" in rows[2][1]
+    assert "2.5s pause pastes a dictation" in rows[2][1]
     assert rows[3][1] == cli.MIC_NOTE
     assert "microphone indicator stays on" in rows[3][1]
 
@@ -1712,7 +1712,7 @@ async def test_a_type_dictation_stays_awake_for_the_next_sentence():
         ("add a login test ", False),
         ("and a logout test ", False),
     ]
-    assert all(s.silence_ms == 2000 for s in d.recorder.sessions)
+    assert all(s.silence_ms == 2500 for s in d.recorder.sessions)
 
 
 async def test_awake_s_zero_means_only_trigger_words_start_anything():

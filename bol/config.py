@@ -125,7 +125,7 @@ class WakeConfig:
     # How long a pause ends a dictation and pastes it. Longer than the [audio]
     # silence_ms the conversation flow uses: dictating a prompt has thinking
     # pauses in it. Two seconds, and the paste is instant after them.
-    pause_ms: int = 2000
+    pause_ms: int = 2500
     # How long the pill waits for you to start speaking after a trigger word
     # (or after Bol asked you something). Nothing said in that window and the
     # pill goes away again, so a trigger heard across the room costs five
@@ -477,7 +477,7 @@ type_phrases = []      # a short trigger word that starts dictation, off by defa
 send_phrases = ["send it", "send", "enter"]  # presses Enter on a pending paste
 cancel_phrases = ["scratch that", "close", "scratch", "clear it", "clear that", "clear this", "clear the box"]  # wipes the box
 sleep_phrases = ["stop listening"] # pause Bol; press the hotkey to resume
-pause_ms = 2000        # a pause this long ends a dictation and pastes it
+pause_ms = 2500        # a pause this long ends a dictation and pastes it
 speak_window_ms = 5000 # how long the pill waits for you to start speaking after a
 command_window_s = 10  # after a paste, seconds Bol listens for "send it" or "scratch that", nothing on screen; 0 = keyword ear only
                        # trigger word before it gives up and goes away again

@@ -805,8 +805,10 @@ async def test_a_permission_prompt_becomes_a_question_on_the_pill():
     # opens the microphone once for the answer, and when nobody says anything
     # the question goes back up: it is still outstanding.
     question = ("permission", "Claude wants to run rm -rf build.", "")
-    assert d.hud.calls == [question, ("listening", "Listening", ""), ("idle", "", ""), question]
-    assert d.hud.calls[-1] == question
+    # The question stays up and no microphone opens on its own: the answer
+    # comes through "hey Bol", like everything else.
+    assert d.hud.calls == [question]
+    assert d.recorder.calls == []
 
 
 @pytest.mark.asyncio
@@ -1865,7 +1867,7 @@ async def test_a_trigger_word_waits_speak_window_ms_and_then_hides():
     await asyncio.sleep(0.05)
 
     assert d.recorder.sessions[0].window_ms == d.cfg.wake.speak_window_ms == 5000
-    assert d.recorder.sessions[0].silence_ms == d.cfg.wake.pause_ms == 2000
+    assert d.recorder.sessions[0].silence_ms == d.cfg.wake.pause_ms == 2500
     assert d.hud.states == ["listening", "idle"]
 
 
@@ -1892,20 +1894,18 @@ async def test_room_noise_never_opens_the_pill():
 
 
 @pytest.mark.asyncio
-async def test_a_spoken_summary_opens_the_microphone_exactly_once():
+async def test_a_spoken_summary_opens_no_microphone():
     d = _hook_daemon()
     d.recorder = SessionRecorder(4)
     d.transcriber = FakeTranscriber(["and now add a logout test", "unheard"])
-    # Even with the awake window deliberately switched back on, the window
-    # after Bol speaks is one window and not a rolling one.
-    d.cfg.wake.awake_s = 60.0
     d.wake = FakeWake()
 
     await d._on_stop(_stop("A"))
 
-    assert d.recorder.calls == [True]
-    assert d.recorder.sessions[0].window_ms == d.cfg.wake.speak_window_ms
-    assert d.bridge.injected == [("and now add a logout test ", False)]
+    # The user asked for quiet after a reply: nothing listens until they
+    # say the wake phrase or press the key.
+    assert d.recorder.calls == []
+    assert d.bridge.injected == []
 
 
 @pytest.mark.asyncio
@@ -1914,34 +1914,20 @@ async def test_a_summary_nobody_answers_leaves_a_blank_screen():
 
     await d._on_stop(_stop("A"))
 
-    assert d.recorder.calls == [True]      # one window ...
-    assert d.hud.states[-1] == "idle"      # ... and then nothing on screen
+    assert d.recorder.calls == []          # no window ...
+    assert d.hud.states[-1] == "idle"      # ... and nothing on screen
     assert d.bridge.injected == []
 
 
 @pytest.mark.asyncio
-async def test_one_way_opens_no_window_after_anything():
-    # There is no summary in one-way, so there is nothing to answer and the
-    # microphone is never opened on Bol's own say-so.
-    d = _one_way(2, ["never heard"])
-
-    await d._on_stop(_stop("A"))
-    await d._follow_up_listen()
-
-    assert d.recorder.calls == []
-    assert d.hud.calls == []
-
-
 # ------------------------------------------------ the command window after a paste
 
 
-def _window_daemon(utterances, texts, window_s=10.0, type_phrases=()):
+def _window_daemon(utterances, texts, window_s=10.0, type_phrases=None):
     """One-way, no pill, wake ear faked: the daemon that types and then waits
     for a bare command with nothing on screen."""
-    d = _daemon(
-        utterances, texts, talk_back=False, clock=Ticks(),
-        type_phrases=type_phrases,
-    )
+    extra = {"type_phrases": type_phrases} if type_phrases is not None else {}
+    d = _daemon(utterances, texts, talk_back=False, clock=Ticks(), **extra)
     d.summarizer = None
     d.wake = FakeWake()
     d.cfg.wake.command_window_s = window_s
