@@ -80,13 +80,31 @@ class TemplateSummarizer:
         self._name = cfg.summarizer.user_name
 
     async def summarize(self, event: StopEvent) -> str:
+        """State, then what it did, then what it says. No question of Bol's own.
+
+        The relay shape the user asked for: "Claude is done. It edited two
+        files and ran the tests. It says the login test passes." A failed tool
+        call turns the opening into "hit a problem"; a question mark in the
+        agent's message turns it into "needs you".
+        """
         agent = display_name(event.agent)
         activity = describe_tools(event.tools)
         gist = _spoken(event.last_assistant_message)
-        pieces = [p for p in (activity.capitalize() if activity else "", gist) if p]
-        if not pieces:
-            body = f"{agent}'s done, but it didn't say much."
+        failed = any(not tool.ok for tool in event.tools)
+        asks = gist.rstrip().endswith("?")
+        if failed:
+            state = f"{agent} hit a problem."
+        elif asks:
+            state = f"{agent} needs you."
         else:
-            body = ". ".join(pieces).rstrip(".") + "."
-        ask = f"What should {agent} do next{', ' + self._name if self._name else ''}?"
-        return f"{body} {ask}"
+            state = f"{agent} is done."
+        if self._name:
+            state = f"{self._name}, {state[0].lower()}{state[1:]}"
+        parts = [state]
+        if activity:
+            parts.append(f"It {activity}.")
+        if gist:
+            parts.append(f"It's asking: {gist}" if asks else f"It says: {gist}")
+        elif not activity:
+            parts.append("It didn't say much.")
+        return " ".join(parts)

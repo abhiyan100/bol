@@ -243,7 +243,7 @@ async def test_the_template_summarizer_names_the_agent():
         agent="codex",
     )
     text = await TemplateSummarizer(cfg).summarize(event)
-    assert "What should Codex do next" in text
+    assert "Codex is done" in text
     assert "Claude" not in text
 
 
@@ -251,7 +251,7 @@ async def test_the_template_summarizer_names_the_agent():
 async def test_the_template_summarizer_still_says_claude_by_default():
     event = StopEvent("s", "p", "", "", "")
     text = await TemplateSummarizer(Config()).summarize(event)
-    assert "What should Claude do next" in text
+    assert "Claude is done" in text
 
 
 def test_the_persona_prompt_names_the_agent_it_describes():
